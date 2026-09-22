@@ -1,16 +1,19 @@
 // Package network provides an in-process simulated network connecting
-// local nodes. Delivery is explicit (DeliverOne / DeliverAll) so tests
-// never depend on timing or real sockets. Links can be cut/restored
-// (partition + recovery) and duplicate delivery is supported.
+// local validator nodes. Delivery is explicit (DeliverOne /
+// DeliverRound / DeliverAll) instead of timer-driven, so tests never
+// depend on wall-clock timing or real sockets. A node can be
+// disconnected (partitioned, its incoming messages held) and restored,
+// and messages can be redelivered to simulate duplicate broadcasts.
 package network
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/h3yow/pos-consensus-ledger-go/internal/types"
 )
 
-// Handler receives delivered messages (typically a *node.Node).
+// Handler receives delivered messages (implemented by *node.Node).
 type Handler interface {
 	ID() string
 	HandleMessage(m types.Message)
@@ -21,41 +24,173 @@ type SimNetwork struct {
 	mu        sync.Mutex
 	handlers  map[string]Handler
 	queues    map[string][]types.Message
-	connected map[string]bool // node online/offline (partition)
-	seq       int
+	connected map[string]bool
 }
 
 // New creates an empty simulated network.
-func New() *SimNetwork { panic("not implemented") }
+func New() *SimNetwork {
+	return &SimNetwork{
+		handlers:  map[string]Handler{},
+		queues:    map[string][]types.Message{},
+		connected: map[string]bool{},
+	}
+}
 
 // Register connects a node to the network.
-func (n *SimNetwork) Register(h Handler) { panic("not implemented") }
+func (n *SimNetwork) Register(h Handler) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.handlers[h.ID()] = h
+	n.queues[h.ID()] = nil
+	n.connected[h.ID()] = true
+}
 
-// Broadcast enqueues a message to every connected node except the sender
-// (and except explicitly disconnected receivers). Messages to
-// disconnected receivers are held until Restore.
-func (n *SimNetwork) Broadcast(m types.Message) { panic("not implemented") }
+// Broadcast enqueues a message for every connected node except the
+// sender. While a receiver is disconnected its messages are still held
+// in its queue and become deliverable after Restore.
+func (n *SimNetwork) Broadcast(m types.Message) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	ids := make([]string, 0, len(n.handlers))
+	for id := range n.handlers {
+		if id == m.From {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if !n.connected[id] {
+			// Hold messages for partitioned receivers so that after
+			// recovery they observe the delayed broadcasts.
+		}
+		n.queues[id] = append(n.queues[id], m)
+	}
+}
 
-// DeliverOne delivers the oldest queued message for a node.
-// It returns false when the queue is empty.
-func (n *SimNetwork) DeliverOne(nodeID string) bool { panic("not implemented") }
+// popLocked removes and returns the oldest queued message for id.
+func (n *SimNetwork) popLocked(id string) (types.Message, bool) {
+	q := n.queues[id]
+	if len(q) == 0 {
+		return types.Message{}, false
+	}
+	m := q[0]
+	n.queues[id] = q[1:]
+	return m, true
+}
 
-// DeliverRound delivers one queued message per node, once, in a fixed
-// node-id order, returning how many messages were delivered.
-func (n *SimNetwork) DeliverRound() int { panic("not implemented") }
+// DeliverOne delivers the oldest queued message to a connected node.
+// Messages to a currently disconnected node are skipped (kept queued).
+// It returns false when nothing could be delivered.
+func (n *SimNetwork) DeliverOne(nodeID string) bool {
+	n.mu.Lock()
+	h, ok := n.handlers[nodeID]
+	if !ok {
+		n.mu.Unlock()
+		return false
+	}
+	for {
+		m, has := n.popLocked(nodeID)
+		if !has {
+			n.mu.Unlock()
+			return false
+		}
+		if !n.connected[nodeID] {
+			// Put it back at the front while partitioned.
+			n.queues[nodeID] = append([]types.Message{m}, n.queues[nodeID]...)
+			n.mu.Unlock()
+			return false
+		}
+		n.mu.Unlock()
+		h.HandleMessage(m)
+		n.mu.Lock()
+		return true
+	}
+}
 
-// DeliverAll repeatedly delivers rounds until every queue is empty.
-func (n *SimNetwork) DeliverAll() int { panic("not implemented") }
+// nodeIDsLocked returns handler ids in ascending order.
+func (n *SimNetwork) nodeIDsLocked() []string {
+	ids := make([]string, 0, len(n.handlers))
+	for id := range n.handlers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// DeliverRound delivers at most one queued message per node, once each,
+// in fixed ascending node-id order, returning the delivered count.
+func (n *SimNetwork) DeliverRound() int {
+	delivered := 0
+	for _, id := range n.snapshotIDs() {
+		if n.DeliverOne(id) {
+			delivered++
+		}
+	}
+	return delivered
+}
+
+// DeliverAll repeatedly delivers rounds until every connected queue is
+// empty (including messages generated while processing), returning the
+// total number of deliveries.
+func (n *SimNetwork) DeliverAll() int {
+	total := 0
+	for {
+		d := n.DeliverRound()
+		total += d
+		if d == 0 {
+			return total
+		}
+	}
+}
+
+func (n *SimNetwork) snapshotIDs() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.nodeIDsLocked()
+}
 
 // Pending reports the queued message count for a node.
-func (n *SimNetwork) Pending(nodeID string) int { panic("not implemented") }
+func (n *SimNetwork) Pending(nodeID string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.queues[nodeID])
+}
 
-// Disconnect holds a node's incoming messages (partition receiver).
-func (n *SimNetwork) Disconnect(nodeID string) { panic("not implemented") }
+// Disconnect marks a node partitioned: new broadcasts are still held but
+// delivery to it pauses until Restore.
+func (n *SimNetwork) Disconnect(nodeID string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.connected[nodeID] = false
+}
 
-// Restore re-enables delivery for a node; held messages remain queued.
-func (n *SimNetwork) Restore(nodeID string) { panic("not implemented") }
+// Restore reconnects a node; held messages remain queued and flush on
+// the next Deliver* call.
+func (n *SimNetwork) Restore(nodeID string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, ok := n.handlers[nodeID]; ok {
+		n.connected[nodeID] = true
+	}
+}
+
+// IsConnected reports the current connection status.
+func (n *SimNetwork) IsConnected(nodeID string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.connected[nodeID]
+}
 
 // Redeliver duplicates the oldest queued message for a node at the tail,
-// simulating duplicate broadcast / replay.
-func (n *SimNetwork) Redeliver(nodeID string) bool { panic("not implemented") }
+// simulating a duplicate broadcast. Returns false if the queue is empty.
+func (n *SimNetwork) Redeliver(nodeID string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	q := n.queues[nodeID]
+	if len(q) == 0 {
+		return false
+	}
+	n.queues[nodeID] = append(q, q[0])
+	return true
+}
