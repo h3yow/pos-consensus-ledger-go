@@ -12,6 +12,7 @@ import (
 	"github.com/h3yow/pos-consensus-ledger-go/internal/consensus"
 	"github.com/h3yow/pos-consensus-ledger-go/internal/network"
 	"github.com/h3yow/pos-consensus-ledger-go/internal/node"
+	"github.com/h3yow/pos-consensus-ledger-go/internal/state"
 	"github.com/h3yow/pos-consensus-ledger-go/internal/types"
 )
 
@@ -22,6 +23,7 @@ type Cluster struct {
 	GenesisBlock *types.Block
 	Net          *network.SimNetwork
 	Keys         []ed25519.PrivateKey
+	keyByAddr    map[types.Address]ed25519.PrivateKey
 	Nodes        []*node.Node
 	NodeByID     map[string]*node.Node
 	NodeByAddr   map[types.Address]*node.Node
@@ -85,6 +87,7 @@ func NewCluster(weights []uint64, verbose bool) (*Cluster, error) {
 		Keys:         keys,
 		NodeByID:     map[string]*node.Node{},
 		NodeByAddr:   map[types.Address]*node.Node{},
+		keyByAddr:    keyByAddr,
 	}
 	for i, v := range vals {
 		var logger node.Logger
@@ -203,4 +206,41 @@ func (r *seedReader) Read(p []byte) (int, error) {
 		p[i] = byte(state * 2685821657736338717 >> 56)
 	}
 	return len(p), nil
+}
+
+// CraftBlock signs a block with the key of proposerAddr at height/round
+// on top of parent, with no transactions. It computes the state root by
+// applying only the given evidence. This bypasses honest guards so tests
+// can simulate byzantine proposals.
+func (c *Cluster) CraftBlock(proposerAddr types.Address, parent *types.Block,
+	height uint64, round uint32, timestamp uint64, evs []*types.Evidence) *types.Block {
+	key, ok := c.keyByAddr[proposerAddr]
+	if !ok {
+		panic("testkit: no key for proposer " + proposerAddr.String())
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	b := &types.Block{
+		Height:      height,
+		Round:       uint32(round),
+		ParentHash:  parent.Hash(),
+		Proposer:    proposerAddr,
+		ProposerPub: pub,
+		Evidence:    evs,
+		Timestamp:   timestamp,
+		TxRoot:      consensus.TxRoot(nil),
+	}
+	// Derive state from parent state stored on node 0 if present.
+	var st *state.State
+	if ns, err := c.Nodes[0].Store().GetState(parent.Hash()); err == nil {
+		st = ns.Clone()
+	} else {
+		st = state.FromGenesis(c.Genesis)
+	}
+	g := c.Genesis
+	for _, ev := range evs {
+		st.SlashEvidence(ev, g.Treasury, g.SlashRateNumerator, g.SlashRateDenominator)
+	}
+	b.StateRoot = st.Root()
+	b.Sig = ed25519.Sign(key, b.HeaderBytes())
+	return b
 }
