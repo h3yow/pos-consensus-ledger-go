@@ -85,27 +85,19 @@ func (n *SimNetwork) popLocked(id string) (types.Message, bool) {
 func (n *SimNetwork) DeliverOne(nodeID string) bool {
 	n.mu.Lock()
 	h, ok := n.handlers[nodeID]
-	if !ok {
+	if !ok || !n.connected[nodeID] || len(n.queues[nodeID]) == 0 {
 		n.mu.Unlock()
 		return false
 	}
-	for {
-		m, has := n.popLocked(nodeID)
-		if !has {
-			n.mu.Unlock()
-			return false
-		}
-		if !n.connected[nodeID] {
-			// Put it back at the front while partitioned.
-			n.queues[nodeID] = append([]types.Message{m}, n.queues[nodeID]...)
-			n.mu.Unlock()
-			return false
-		}
-		n.mu.Unlock()
-		h.HandleMessage(m)
-		n.mu.Lock()
-		return true
-	}
+	q := n.queues[nodeID]
+	m := q[0]
+	n.queues[nodeID] = q[1:]
+	n.mu.Unlock()
+
+	// Deliver WITHOUT holding the switch lock: handlers may broadcast
+	// further messages, which must be able to re-enter the network.
+	h.HandleMessage(m)
+	return true
 }
 
 // nodeIDsLocked returns handler ids in ascending order.

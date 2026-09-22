@@ -386,7 +386,7 @@ func (n *Node) autoMaybeVote() {
 		n.votes.Get(types.AddressFromPub(n.pub), head.Height, head.Round) != nil {
 		return
 	}
-	if _, err := n.VoteFor(head.Height, head.Round, head.Hash()); err != nil {
+	if _, err := n.voteForLocked(head.Height, head.Round, head.Hash()); err != nil {
 		n.logger.Printf("auto-vote failed h=%d r=%d: %v", head.Height, head.Round, err)
 	}
 }
@@ -550,7 +550,10 @@ func (n *Node) buildBlockLocked(head *types.Block, base *state.State, height uin
 func (n *Node) VoteFor(height uint64, round uint32, h types.Hash) (*types.Vote, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.voteForLocked(height, round, h)
+}
 
+func (n *Node) voteForLocked(height uint64, round uint32, h types.Hash) (*types.Vote, error) {
 	me := types.AddressFromPub(n.pub)
 	if prior := n.votes.Get(me, height, round); prior != nil {
 		if prior.BlockHash == h {
