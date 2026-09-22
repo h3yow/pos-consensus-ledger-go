@@ -15,18 +15,18 @@ import (
 
 // Validation errors give distinguishable rejection reasons in logs.
 var (
-	ErrMalformed        = errors.New("consensus: malformed block")
-	ErrUnknownParent    = errors.New("consensus: unknown parent")
-	ErrBadProposer      = errors.New("consensus: proposer not in validator set")
-	ErrBadBlockSig      = errors.New("consensus: invalid block signature")
+	ErrMalformed         = errors.New("consensus: malformed block")
+	ErrUnknownParent     = errors.New("consensus: unknown parent")
+	ErrBadProposer       = errors.New("consensus: proposer not in validator set")
+	ErrBadBlockSig       = errors.New("consensus: invalid block signature")
 	ErrFinalizedRollback = errors.New("consensus: block conflicts with finalized chain")
-	ErrBadStateRoot     = errors.New("consensus: state root mismatch")
-	ErrBadTxRoot        = errors.New("consensus: transaction root mismatch")
-	ErrDuplicateBlock   = errors.New("consensus: duplicate block")
-	ErrInvalidEvidence  = errors.New("consensus: invalid evidence")
-	ErrBadVoter         = errors.New("consensus: voter not in validator set")
-	ErrBadVoteSig       = errors.New("consensus: invalid vote signature")
-	ErrVoteHeight       = errors.New("consensus: vote for unknown height")
+	ErrBadStateRoot      = errors.New("consensus: state root mismatch")
+	ErrBadTxRoot         = errors.New("consensus: transaction root mismatch")
+	ErrDuplicateBlock    = errors.New("consensus: duplicate block")
+	ErrInvalidEvidence   = errors.New("consensus: invalid evidence")
+	ErrBadVoter          = errors.New("consensus: voter not in validator set")
+	ErrBadVoteSig        = errors.New("consensus: invalid vote signature")
+	ErrVoteHeight        = errors.New("consensus: vote for unknown height")
 )
 
 // Engine bundles genesis parameters and pure decision rules.

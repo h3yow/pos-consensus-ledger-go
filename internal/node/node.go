@@ -26,18 +26,18 @@ type Logger interface {
 type Node struct {
 	mu sync.Mutex
 
-	id      string
-	key     ed25519.PrivateKey
-	eng     *consensus.Engine
-	net     *network.SimNetwork
-	store   *store.Store
-	votes   *store.VotesStore
-	tally   *consensus.Tally
-	pool    *mempool.Mempool
-	logger  Logger
+	id     string
+	key    ed25519.PrivateKey
+	eng    *consensus.Engine
+	net    *network.SimNetwork
+	store  *store.Store
+	votes  *store.VotesStore
+	tally  *consensus.Tally
+	pool   *mempool.Mempool
+	logger Logger
 
-	headHash types.Hash
-	finalHash types.Hash
+	headHash    types.Hash
+	finalHash   types.Hash
 	finalHeight uint64
 
 	// slashSeen deduplicates already-applied evidence (by evidence hash).
@@ -49,11 +49,11 @@ type Node struct {
 
 // Config constructs a node.
 type Config struct {
-	ID     string
-	Key    ed25519.PrivateKey
-	Engine *consensus.Engine
-	Net    *network.SimNetwork
-	Logger Logger
+	ID      string
+	Key     ed25519.PrivateKey
+	Engine  *consensus.Engine
+	Net     *network.SimNetwork
+	Logger  Logger
 	PoolCap int
 }
 
