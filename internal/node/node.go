@@ -60,6 +60,10 @@ type Node struct {
 
 	// orphans buffers blocks whose parent is not yet known.
 	orphans []*types.Block
+
+	// pendingVotes buffers votes for blocks not yet received; they are
+	// replayed once the block arrives (votes often precede blocks).
+	pendingVotes []*types.Vote
 }
 
 // Config constructs a node.
@@ -196,9 +200,28 @@ func (n *Node) handleBlockLocked(b *types.Block, src string) error {
 	if err := n.applyForkChoice(); err != nil {
 		return err
 	}
+	n.replayPendingVotes()
 	n.autoMaybeVote()
 	n.checkFinality()
 	return nil
+}
+
+// replayPendingVotes retries buffered votes whose block is now known.
+func (n *Node) replayPendingVotes() {
+	if len(n.pendingVotes) == 0 {
+		return
+	}
+	remaining := make([]*types.Vote, 0, len(n.pendingVotes))
+	for _, v := range n.pendingVotes {
+		if !n.store.Has(v.BlockHash) {
+			remaining = append(remaining, v)
+			continue
+		}
+		if err := n.handleVoteLocked(v, n.id+"-buffer"); err != nil {
+			n.logger.Printf("buffered vote replay failed h=%d: %v", v.Height, err)
+		}
+	}
+	n.pendingVotes = remaining
 }
 
 // ingestBlockLocked validates and stores one block (buffering orphans),
@@ -296,9 +319,18 @@ func (n *Node) handleVoteLocked(v *types.Vote, src string) error {
 	if err := n.eng.ValidateVote(v); err != nil {
 		return err
 	}
-	// We only tally votes for blocks we know (prevents unanchored votes).
+	// Buffer votes for blocks we have not received yet and replay them
+	// when the block lands (vote messages can arrive before the block).
 	if !n.store.Has(v.BlockHash) {
-		return ErrBlockNotInStore
+		for _, pv := range n.pendingVotes {
+			if pv.Hash() == v.Hash() {
+				return nil
+			}
+		}
+		n.pendingVotes = append(n.pendingVotes, v)
+		n.logger.Printf("vote buffered (block unknown) h=%d r=%d block=%s voter=%s",
+			v.Height, v.Round, v.BlockHash, v.Voter)
+		return nil
 	}
 	vh := v.Hash()
 	prior := n.votes.Add(v)
