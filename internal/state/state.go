@@ -32,13 +32,14 @@ type Account struct {
 
 // State is a copyable account database rooted by a commitment.
 type State struct {
-	chainID  string
-	accounts map[types.Address]*Account
+	chainID   string
+	accounts  map[types.Address]*Account
+	appliedEv map[types.Hash]bool
 }
 
 // New creates an empty state for the given chain id.
 func New(chainID string) *State {
-	return &State{chainID: chainID, accounts: map[types.Address]*Account{}}
+	return &State{chainID: chainID, accounts: map[types.Address]*Account{}, appliedEv: map[types.Hash]bool{}}
 }
 
 // FromGenesis builds the genesis account set.
@@ -53,11 +54,18 @@ func FromGenesis(g *types.Genesis) *State {
 
 // Clone deep-copies the state so block branches can diverge.
 func (s *State) Clone() *State {
-	c := &State{chainID: s.chainID, accounts: make(map[types.Address]*Account, len(s.accounts))}
+	c := &State{
+		chainID:   s.chainID,
+		accounts:  make(map[types.Address]*Account, len(s.accounts)),
+		appliedEv: make(map[types.Hash]bool, len(s.appliedEv)),
+	}
 	for addr, acc := range s.accounts {
 		a := addr
 		ac := *acc
 		c.accounts[a] = &ac
+	}
+	for h := range s.appliedEv {
+		c.appliedEv[h] = true
 	}
 	return c
 }
@@ -162,6 +170,22 @@ func (s *State) account(addr types.Address) *Account {
 	acc := &Account{}
 	s.accounts[addr] = acc
 	return acc
+}
+
+// EvidenceApplied reports whether evidence hash h was already applied.
+func (s *State) EvidenceApplied(h types.Hash) bool { return s.appliedEv[h] }
+
+// SlashEvidence applies evidence exactly once on this branch: it marks
+// the evidence as applied and performs the slash, returning the amount.
+// A repeat is a no-op returning 0. Total balance is conserved.
+func (s *State) SlashEvidence(ev *types.Evidence, treasury types.Address, num, denom uint64) uint64 {
+	eh := ev.Hash()
+	if s.appliedEv[eh] {
+		return 0
+	}
+	amount := s.Slash(ev.Offender(), treasury, num, denom)
+	s.appliedEv[eh] = true
+	return amount
 }
 
 // Slash removes stake from an offender's balance and credits the same

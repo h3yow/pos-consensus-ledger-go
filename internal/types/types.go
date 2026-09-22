@@ -386,13 +386,15 @@ const (
 	MsgTx MsgKind = iota + 1
 	MsgBlock
 	MsgVote
+	MsgEvidence
 )
 
 // Message is an envelope broadcast between simulated nodes.
 type Message struct {
-	Kind  MsgKind
-	From  string
-	Tx    *Tx
-	Block *Block
-	Vote  *Vote
+	Kind     MsgKind
+	From     string
+	Tx       *Tx
+	Block    *Block
+	Vote     *Vote
+	Evidence *Evidence
 }

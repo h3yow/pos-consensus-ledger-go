@@ -147,8 +147,8 @@ func sortBlocks(bs []*types.Block) {
 	}
 }
 
-// VotesStore keeps observed votes keyed by (voter,height). A second,
-// different vote from the same voter at the same height is equivocation.
+// VotesStore keeps observed votes keyed by (voter,height,round). A second
+// different vote in the SAME slot is equivocation; a new round is allowed.
 type VotesStore struct {
 	mu    sync.RWMutex
 	votes map[voteKey]*types.Vote
@@ -157,6 +157,7 @@ type VotesStore struct {
 type voteKey struct {
 	voter  types.Address
 	height uint64
+	round  uint32
 }
 
 // NewVotes creates an empty vote store.
@@ -164,11 +165,11 @@ func NewVotes() *VotesStore {
 	return &VotesStore{votes: map[voteKey]*types.Vote{}}
 }
 
-// Add records a vote and returns the previously seen one (nil if none).
+// Add records a vote and returns the previously seen one in the slot.
 func (v *VotesStore) Add(vote *types.Vote) *types.Vote {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	k := voteKey{vote.Voter, vote.Height}
+	k := voteKey{vote.Voter, vote.Height, vote.Round}
 	prior := v.votes[k]
 	if prior == nil {
 		v.votes[k] = vote
@@ -176,14 +177,14 @@ func (v *VotesStore) Add(vote *types.Vote) *types.Vote {
 	return prior
 }
 
-// Get returns the recorded vote for a voter at a height.
-func (v *VotesStore) Get(voter types.Address, height uint64) *types.Vote {
+// Get returns the recorded vote for a voter in a slot.
+func (v *VotesStore) Get(voter types.Address, height uint64, round uint32) *types.Vote {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.votes[voteKey{voter, height}]
+	return v.votes[voteKey{voter, height, round}]
 }
 
-// All returns all recorded votes ordered by (height, voter) for stable output.
+// All returns all recorded votes ordered by (height, round, voter).
 func (v *VotesStore) All() []*types.Vote {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -194,7 +195,9 @@ func (v *VotesStore) All() []*types.Vote {
 	for i := 1; i < len(out); i++ {
 		for j := i; j > 0; j-- {
 			a, b := out[j-1], out[j]
-			if a.Height < b.Height || (a.Height == b.Height && a.Voter.Cmp(b.Voter) < 0) {
+			if a.Height < b.Height ||
+				(a.Height == b.Height && a.Round < b.Round) ||
+				(a.Height == b.Height && a.Round == b.Round && a.Voter.Cmp(b.Voter) < 0) {
 				break
 			}
 			out[j-1], out[j] = out[j], out[j-1]
