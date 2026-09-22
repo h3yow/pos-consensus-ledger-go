@@ -186,60 +186,13 @@ func (n *Node) handleTxLocked(tx *types.Tx, src string) error {
 	return nil
 }
 
-// handleBlock validates and stores a block, gossips it on first sight,
-// retries buffered orphans, re-runs fork choice and votes if scheduled.
+// handleBlockLocked ingests a block and, after processing any
+// now-unblocked orphans, runs fork choice / voting / finality.
 func (n *Node) handleBlockLocked(b *types.Block, src string) error {
-	if b == nil {
-		return errors.New("nil block")
-	}
-	h := b.Hash()
-	if n.store.Has(h) {
-		n.logger.Printf("block dup h=%d r=%d hash=%s from=%s -> ignore",
-			b.Height, b.Round, h, src)
-		return nil
-	}
-	// Finality guard: a block at/below finalized height that is not the
-	// finalized block itself can never be accepted.
-	if b.Height <= n.finalHeight && h != n.finalHash {
-		n.logger.Printf("block REJECT finality h=%d finalizedH=%d hash=%s",
-			b.Height, n.finalHeight, h)
-		return consensus.ErrFinalizedRollback
-	}
-
-	parent, perr := n.store.GetBlock(b.ParentHash)
-	if perr != nil {
-		n.orphans = append(n.orphans, b)
-		n.logger.Printf("block orphan h=%d r=%d hash=%s parent=%s buffered",
-			b.Height, b.Round, h, b.ParentHash)
-		return nil
-	}
-	parentState, serr := n.store.GetState(parent.Hash())
-	if serr != nil {
-		return serr
-	}
-	st, err := n.eng.ValidateBlock(b, parent, parentState)
-	if err != nil {
+	if _, err := n.ingestBlockLocked(b, src); err != nil {
 		return err
 	}
-	n.store.PutBlock(b)
-	n.store.PutState(h, st)
-	n.logger.Printf("block ACCEPT h=%d r=%d hash=%s parent=%s proposer=%s txs=%d ev=%d stateRoot=%s from=%s",
-		b.Height, b.Round, h, b.ParentHash, b.Proposer, len(b.Txs), len(b.Evidence), b.StateRoot, src)
-
-	// First sight: relay exactly once. Duplicate broadcasts are absorbed
-	// by the Has(h) check above on peers.
-	if n.net != nil && src != n.id {
-		n.net.Broadcast(types.Message{Kind: types.MsgBlock, From: n.id, Block: b})
-	}
-
-	// Proposal equivocation: another block from the same proposer/slot?
-	for _, other := range n.store.BlocksAt(b.Height) {
-		if ev := n.eng.DetectBlockEquivocation(b, other); ev != nil {
-			n.relayEvidence(ev, "block-dual-proposal")
-		}
-	}
-
-	n.tryOrphans()
+	n.drainOrphans()
 	if err := n.applyForkChoice(); err != nil {
 		return err
 	}
@@ -248,25 +201,93 @@ func (n *Node) handleBlockLocked(b *types.Block, src string) error {
 	return nil
 }
 
-// tryOrphans re-attempts buffered blocks whose parents may have arrived.
-func (n *Node) tryOrphans() {
-	if len(n.orphans) == 0 {
-		return
+// ingestBlockLocked validates and stores one block (buffering orphans),
+// relays it on first sight and reports proposal equivocation. It returns
+// (stored=true, err=nil) when the block became part of the DAG.
+func (n *Node) ingestBlockLocked(b *types.Block, src string) (bool, error) {
+	if b == nil {
+		return false, errors.New("nil block")
 	}
-	remaining := make([]*types.Block, 0, len(n.orphans))
-	for _, b := range n.orphans {
-		if n.store.Has(b.Hash()) {
-			continue
-		}
-		if n.store.Has(b.ParentHash) {
-			if err := n.handleBlockLocked(b, n.id+"-orphan"); err != nil {
-				n.logger.Printf("orphan retry failed h=%d: %v", b.Height, err)
+	h := b.Hash()
+	if n.store.Has(h) {
+		n.logger.Printf("block dup h=%d r=%d hash=%s from=%s -> ignore",
+			b.Height, b.Round, h, src)
+		return false, nil
+	}
+	// Finality guard: a block at/below finalized height that is not the
+	// finalized block itself is permanently invalid. Dropping it must not
+	// abort the calling delivery round: messages queued behind it (the
+	// canonical chain) still need to advance the head.
+	if b.Height <= n.finalHeight && h != n.finalHash {
+		n.logger.Printf("block REJECT finality h=%d finalizedH=%d hash=%s -> drop (no rollback)",
+			b.Height, n.finalHeight, h)
+		return false, nil
+	}
+
+	if _, perr := n.store.GetBlock(b.ParentHash); perr != nil {
+		for _, ob := range n.orphans {
+			if ob.Hash() == h {
+				return false, nil
 			}
-			continue
 		}
-		remaining = append(remaining, b)
+		n.orphans = append(n.orphans, b)
+		n.logger.Printf("block orphan h=%d r=%d hash=%s parent=%s buffered",
+			b.Height, b.Round, h, b.ParentHash)
+		return false, nil
 	}
-	n.orphans = remaining
+	parent, _ := n.store.GetBlock(b.ParentHash)
+	parentState, serr := n.store.GetState(parent.Hash())
+	if serr != nil {
+		return false, serr
+	}
+	st, err := n.eng.ValidateBlock(b, parent, parentState)
+	if err != nil {
+		return false, err
+	}
+	n.store.PutBlock(b)
+	n.store.PutState(h, st)
+	n.logger.Printf("block ACCEPT h=%d r=%d hash=%s parent=%s proposer=%s txs=%d ev=%d stateRoot=%s from=%s",
+		b.Height, b.Round, h, b.ParentHash, b.Proposer, len(b.Txs), len(b.Evidence), b.StateRoot, src)
+
+	if n.net != nil && src != n.id && src != n.id+"-orphan" {
+		n.net.Broadcast(types.Message{Kind: types.MsgBlock, From: n.id, Block: b})
+	}
+	for _, other := range n.store.BlocksAt(b.Height) {
+		if ev := n.eng.DetectBlockEquivocation(b, other); ev != nil {
+			n.relayEvidence(ev, "block-dual-proposal")
+		}
+	}
+	return true, nil
+}
+
+// drainOrphans repeatedly attempts buffered blocks whose parent is now
+// known, removing them on success/final-invalidity and keeping only the
+// still-unconnected ones. It never re-enters fork choice.
+func (n *Node) drainOrphans() {
+	for {
+		progressed := false
+		remaining := make([]*types.Block, 0, len(n.orphans))
+		for _, b := range n.orphans {
+			if n.store.Has(b.Hash()) {
+				progressed = true
+				continue
+			}
+			if !n.store.Has(b.ParentHash) {
+				remaining = append(remaining, b)
+				continue
+			}
+			// Parent known: validate/store WITHOUT the fork-choice tail.
+			_, err := n.ingestBlockLocked(b, n.id+"-orphan")
+			if err != nil {
+				n.logger.Printf("orphan invalid h=%d hash=%s: %v", b.Height, b.Hash(), err)
+			}
+			progressed = true
+		}
+		n.orphans = remaining
+		if !progressed || len(remaining) == 0 {
+			return
+		}
+	}
 }
 
 // handleVote records a vote, detects equivocation, updates the tally and
@@ -419,25 +440,49 @@ func (n *Node) checkFinality() {
 	}
 }
 
-// ProposeBlock honestly proposes round 0 for head+1 if this node is the
-// scheduled proposer. Tests may use ProposeRound for higher-round/faulty
-// scenarios.
+// ProposeBlock honestly proposes round 0 for the height after this node's
+// canonical head if it is the scheduled proposer.
 func (n *Node) ProposeBlock() (*types.Block, error) {
-	return n.ProposeRound(0, nil)
-}
-
-// ProposeRound builds and gossips a block at head+1 with the given round.
-// extraEv is appended to locally pending evidence (used by adversarial
-// test harnesses to force inclusion).
-func (n *Node) ProposeRound(round uint32, extraEv []*types.Evidence) (*types.Block, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	head, err := n.store.GetBlock(n.headHash)
+	h := n.headHash
+	n.mu.Unlock()
+	head, err := n.store.GetBlock(h)
 	if err != nil {
 		return nil, ErrNoHead
 	}
-	height := head.Height + 1
+	return n.ProposeAt(head.Height+1, 0, nil)
+}
+
+// ProposeRound builds at head+1 with a non-zero round (used when the
+// round-0 scheduled proposer is absent in a partition).
+func (n *Node) ProposeRound(round uint32, extraEv []*types.Evidence) (*types.Block, error) {
+	n.mu.Lock()
+	h := n.headHash
+	n.mu.Unlock()
+	head, err := n.store.GetBlock(h)
+	if err != nil {
+		return nil, ErrNoHead
+	}
+	return n.ProposeAt(head.Height+1, round, extraEv)
+}
+
+// ProposeAt builds and gossips a block at an explicit height/round. The
+// parent is this node's canonical-chain block at height-1 (looked up from
+// storage), so a proposer whose local head lags (e.g. just recovered from
+// a partition) still builds on the correct parent as long as it has it.
+func (n *Node) ProposeAt(height uint64, round uint32, extraEv []*types.Evidence) (*types.Block, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	chain, err := n.store.Chain(n.headHash)
+	if err != nil {
+		return nil, err
+	}
+	if height == 0 || height > uint64(len(chain)) {
+		return nil, fmt.Errorf("node: cannot propose h=%d on chain of length %d",
+			height, len(chain))
+	}
+	head := chain[height-1]
 	scheduled := n.eng.ScheduledProposer(height, round)
 	if scheduled.Address != types.AddressFromPub(n.pub) {
 		return nil, fmt.Errorf("%w: h=%d r=%d scheduled=%s self=%s",
@@ -448,7 +493,7 @@ func (n *Node) ProposeRound(round uint32, extraEv []*types.Evidence) (*types.Blo
 	}
 
 	txs := n.pool.Pack(maxTxsPerBlock)
-	evs := n.collectEvidence(extraEv)
+	evs := n.collectEvidence(head, extraEv)
 
 	st, err := n.store.GetState(head.Hash())
 	if err != nil {
@@ -472,14 +517,13 @@ func (n *Node) ProposeRound(round uint32, extraEv []*types.Evidence) (*types.Blo
 
 // collectEvidence returns valid, not-yet-applied pending evidence sorted
 // by hash, then removes the included ones from the pending set.
-func (n *Node) collectEvidence(extra []*types.Evidence) []*types.Evidence {
+func (n *Node) collectEvidence(head *types.Block, extra []*types.Evidence) []*types.Evidence {
 	for _, ev := range extra {
 		if ev != nil && ev.Validator() {
 			n.pendingEv[ev.Hash()] = ev
 		}
 	}
-	head, _ := n.store.GetBlock(n.headHash)
-	st, _ := n.store.GetState(n.headHash)
+	st, _ := n.store.GetState(head.Hash())
 	var out []*types.Evidence
 	for eh, ev := range n.pendingEv {
 		if ev.Height > head.Height {

@@ -212,19 +212,21 @@ func (e *Engine) ValidateVote(v *types.Vote) error {
 //     they differ; at that slot prefer (lower round, then lower hash).
 //  3. Equal prefixes: the longer chain wins; identical chains compare equal.
 func (e *Engine) ForkChoice(st *store.Store, candidates []types.Hash, finalizedHash types.Hash, finalizedHeight uint64) (types.Hash, error) {
+	// Candidates that do not extend the finalized tip are invalid after
+	// finality: EXCLUDE them (e.g. an old competing block left as a tip),
+	// rather than aborting selection for every other valid chain.
 	chains := make([][]*types.Block, 0, len(candidates))
 	for _, h := range candidates {
 		ch, err := st.Chain(h)
 		if err != nil {
 			return types.ZeroHash, err
 		}
-		if uint64(len(ch))-1 < finalizedHeight {
-			return types.ZeroHash, fmt.Errorf("%w: chain shorter than finalized height",
-				ErrFinalizedRollback)
+		// ch is ordered by height starting at 0, so block height == index.
+		if uint64(len(ch)) <= finalizedHeight {
+			continue
 		}
 		if ch[finalizedHeight].Hash() != finalizedHash {
-			return types.ZeroHash, fmt.Errorf("%w: at height %d want %s",
-				ErrFinalizedRollback, finalizedHeight, finalizedHash)
+			continue
 		}
 		chains = append(chains, ch)
 	}

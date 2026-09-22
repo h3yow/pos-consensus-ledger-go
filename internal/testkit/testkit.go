@@ -123,15 +123,24 @@ func (c *Cluster) ProposerFor(height uint64, round uint32) *node.Node {
 	return c.NodeByAddr[v.Address]
 }
 
-// DrivePropose lets the scheduled proposer build the next block and then
-// drains the network, returning the produced block.
-func (c *Cluster) DrivePropose(round uint32) (*types.Block, error) {
-	head := c.Nodes[0].Head()
-	p := c.ProposerFor(head.Height+1, round)
-	if round == 0 {
-		return p.ProposeBlock()
+// DrivePropose lets the scheduled proposer build the block after the
+// given height and returns the produced block (no implicit drain).
+func (c *Cluster) DrivePropose(prevHeight uint64, round uint32) (*types.Block, error) {
+	height := prevHeight + 1
+	p := c.ProposerFor(height, round)
+	return p.ProposeAt(height, round, nil)
+}
+
+// DriveNext proposes the next height after the MAXIMUM head across all
+// nodes (correct even when branches temporarily have different lengths).
+func (c *Cluster) DriveNext(round uint32) (*types.Block, error) {
+	maxH := uint64(0)
+	for _, n := range c.Nodes {
+		if h := n.Head().Height; h > maxH {
+			maxH = h
+		}
 	}
-	return p.ProposeRound(round, nil)
+	return c.DrivePropose(maxH, round)
 }
 
 // Drain delivers all currently queued network messages until no progress
@@ -149,6 +158,20 @@ func SignTx(key ed25519.PrivateKey, to types.Address, nonce, amount, fee uint64)
 	}
 	tx.Sig = ed25519.Sign(key, tx.SigningBytes())
 	return tx
+}
+
+// NewStrangerKey generates a key for an address that has no genesis
+// account (used to exercise the unknown-sender rejection path).
+func NewStrangerKey(t interface {
+	Helper()
+	Fatal(...any)
+}) ed25519.PrivateKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(newSeedReader(777777))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv
 }
 
 // Addr returns the address for key index i.

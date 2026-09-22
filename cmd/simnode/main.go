@@ -50,7 +50,7 @@ func run() error {
 			return fmt.Errorf("submit h=%d: %w", height, err)
 		}
 		c.Drain()
-		if _, err := c.DrivePropose(0); err != nil {
+		if _, err := c.DriveNext(0); err != nil {
 			return fmt.Errorf("height %d propose: %w", height, err)
 		}
 		c.Drain()
@@ -90,7 +90,7 @@ func run() error {
 
 	// Produce two more heights so the evidence is packed into a block.
 	for k := 0; k < 2; k++ {
-		if _, err := c.DrivePropose(0); err != nil {
+		if _, err := c.DriveNext(0); err != nil {
 			return fmt.Errorf("post-evidence propose: %w", err)
 		}
 		c.Drain()
