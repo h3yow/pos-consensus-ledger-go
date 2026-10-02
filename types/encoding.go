@@ -1,6 +1,7 @@
 package types
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 )
@@ -77,25 +78,33 @@ func CanonicalVote(v *Vote) []byte {
 // HashVote returns the canonical digest of a vote.
 func HashVote(v *Vote) Hash { return HashBytes(CanonicalVote(v)) }
 
-// SignVote fills in the vote signature.
-func SignVote(v *Vote) *Vote {
-	d := HashVote(v)
-	v.Sig = d[:]
+// SignVote fills in the vote signature with the voter's Ed25519 private key.
+func SignVote(v *Vote, priv ed25519.PrivateKey) *Vote {
+	v.Sig = ed25519.Sign(priv, CanonicalVote(v))
 	return v
 }
 
-// VerifyVote checks a vote signature.
-func VerifyVote(v *Vote) bool {
-	if len(v.Sig) != 32 {
+// VerifyVote checks the vote signature against the voter's PUBLIC key. The
+// claimed voter address is also required to match the key's derived address,
+// so a valid signature made by one validator can never be relabelled as
+// another validator's vote.
+func VerifyVote(v *Vote, pub ed25519.PublicKey) bool {
+	if len(pub) != PubLen || len(v.Sig) != SigLen {
 		return false
 	}
-	want := HashVote(v)
-	return string(v.Sig) == string(want[:])
+	if AddressOf(pub) != v.Voter {
+		return false
+	}
+	return ed25519.Verify(pub, CanonicalVote(v), v.Sig)
 }
 
 // CanonicalBlock encodes a block deterministically. Two blocks are "the same
 // block" (safe under duplicate broadcast) iff their encodings are identical.
+// The proposer signature is excluded: it authenticates the canonical payload.
 func CanonicalBlock(b *Block) []byte {
+	if b.canonicalBody != nil {
+		return b.canonicalBody
+	}
 	var e enc
 	e.u64(b.Height)
 	e.fixed(b.Proposer[:])
@@ -125,5 +134,33 @@ func CanonicalBlock(b *Block) []byte {
 	return e.b
 }
 
-// HashBlock returns the canonical hash of a block.
+// HashBlock returns the canonical hash of a block. The proposer signature is
+// not part of the canonical payload, so an honest re-broadcast of the same
+// proposal and a signed copy share one hash.
 func HashBlock(b *Block) Hash { return HashBytes(CanonicalBlock(b)) }
+
+// SignBlock signs the canonical block payload with the proposer's private key.
+func SignBlock(b *Block, priv ed25519.PrivateKey) *Block {
+	b.Sig = ed25519.Sign(priv, CanonicalBlock(b))
+	return b
+}
+
+// VerifyBlock checks the proposer signature against a PUBLIC key, and requires
+// that the key is bound to the block's claimed proposer address.
+func VerifyBlock(b *Block, pub ed25519.PublicKey) bool {
+	if len(pub) != PubLen || len(b.Sig) != SigLen {
+		return false
+	}
+	if AddressOf(pub) != b.Proposer {
+		return false
+	}
+	return ed25519.Verify(pub, CanonicalBlock(b), b.Sig)
+}
+
+// AttachCanonicalBodyForEvidence records the exact canonical bytes on a block
+// reconstructed from slashing evidence. Consensus verification code uses it;
+// normal block production never calls this.
+func AttachCanonicalBodyForEvidence(b *Block, body []byte) {
+	cp := append([]byte(nil), body...)
+	b.canonicalBody = cp
+}

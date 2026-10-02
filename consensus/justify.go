@@ -15,7 +15,7 @@ import (
 // block regardless of message timing.
 //
 // A justification vote must:
-//   - have a valid signature;
+//   - carry an Ed25519 signature valid against the voter's PUBLIC key;
 //   - be cast by a genesis validator;
 //   - target the parent height and parent hash;
 //   - come from a distinct voter (duplicate voters count once).
@@ -26,10 +26,11 @@ func (c *Chain) JustificationPower(b *types.Block, parent *BlockNode) uint64 {
 	seen := map[types.Address]bool{}
 	var power uint64
 	for _, v := range b.JustifyVotes {
-		if !types.VerifyVote(v) {
+		pub := c.set.PubKey(v.Voter)
+		if pub == nil || !types.VerifyVote(v, pub) {
 			continue
 		}
-		if !c.set.Contains(v.Voter) || seen[v.Voter] {
+		if seen[v.Voter] {
 			continue
 		}
 		if v.Height != parent.Block.Height || !bytes.Equal(v.BlockHash[:], parent.Hash[:]) {

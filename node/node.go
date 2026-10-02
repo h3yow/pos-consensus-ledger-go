@@ -3,6 +3,7 @@
 package node
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"log"
 	"os"
@@ -14,15 +15,20 @@ import (
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
 
+// DefaultPoolCap is the mempool capacity a node starts with.
+const DefaultPoolCap = 1024
+
 // Node is one simulated validator.
 type Node struct {
 	Name string
 	Addr types.Address
 
+	priv     ed25519.PrivateKey // this node's OWN signing key; never gossiped
 	net      *simnet.Network
 	chain    *consensus.Chain
 	set      *consensus.Set
 	pool     *pool.Pool
+	poolCap  int
 	vals     []*types.Validator
 	pending  []*types.Evidence // equivocation evidence waiting to be packed
 	consumed map[string]bool   // evidence already included in any valid block
@@ -34,6 +40,8 @@ type Node struct {
 type Config struct {
 	Name         string
 	Addr         types.Address
+	PrivKey      ed25519.PrivateKey // this validator's private key
+	PoolCap      int                // <=0 uses DefaultPoolCap
 	Net          *simnet.Network
 	Vals         []*types.Validator
 	Genesis      *types.Block
@@ -42,18 +50,25 @@ type Config struct {
 }
 
 // New builds and registers a node with an independent copy of genesis state.
+// The node keeps only its own private key; verification of every other
+// validator uses the public keys in Vals.
 func New(cfg Config) *Node {
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(os.Stdout, "", log.Lmicroseconds)
+	}
+	if cfg.PoolCap <= 0 {
+		cfg.PoolCap = DefaultPoolCap
 	}
 	c := consensus.NewChainWithSet(cfg.Vals, cfg.Genesis, cfg.GenesisState)
 	n := &Node{
 		Name:     cfg.Name,
 		Addr:     cfg.Addr,
+		priv:     cfg.PrivKey,
 		net:      cfg.Net,
 		chain:    c,
 		set:      consensus.NewSet(cfg.Vals),
-		pool:     pool.New(c.HeadState()),
+		pool:     pool.New(c.HeadState(), cfg.PoolCap),
+		poolCap:  cfg.PoolCap,
 		vals:     cfg.Vals,
 		consumed: make(map[string]bool),
 		proposed: make(map[uint64]types.Hash),
@@ -69,6 +84,14 @@ func (n *Node) infof(format string, args ...any) {
 
 // Chain exposes the consensus chain (tests use it for assertions).
 func (n *Node) Chain() *consensus.Chain { return n.chain }
+
+// Pool exposes the mempool (tests use it for capacity/eviction assertions).
+func (n *Node) Pool() *pool.Pool { return n.pool }
+
+// PrivKey returns this node's own private key. Test harnesses use it to
+// simulate a Byzantine "twin" process that shares one validator's identity;
+// honest code only ever signs with the node's own key.
+func (n *Node) PrivKey() ed25519.PrivateKey { return n.priv }
 
 // ProposerFor reports whether this node is the scheduled proposer at height h.
 func (n *Node) ProposerFor(h uint64) bool { return n.set.ProposerAt(h) == n.Addr }
@@ -201,13 +224,12 @@ func (n *Node) ProduceBlock() *types.Block {
 		}
 	}
 	n.pending = nil
-	burn := uint64(0)
 	for _, ev := range evs {
 		bal := headState.GetBalance(ev.Offender)
-		burn += headState.Slash(ev.Offender, bal/3)
+		headState.Slash(ev.Offender, bal/3) // stake moves to the protocol account
 	}
 
-	// Pack mempool transactions deterministically (fee, nonce, arrival).
+	// Pack mempool transactions deterministically (fee, nonce, hash).
 	txs := n.pool.Ordered(100)
 	executed := make([]*types.Tx, 0, len(txs))
 	for _, t := range txs {
@@ -215,7 +237,6 @@ func (n *Node) ProduceBlock() *types.Block {
 			n.infof("produce: skip tx nonce=%d (%v)", t.Nonce, err)
 			continue
 		}
-		burn += t.Fee
 		executed = append(executed, t)
 	}
 
@@ -228,6 +249,9 @@ func (n *Node) ProduceBlock() *types.Block {
 		Evidence:     evs,
 		JustifyVotes: n.chain.Votes().VotesAt(head.Block.Height),
 	}
+	// Sign with ONLY this node's private key. Other nodes verify against the
+	// proposer's public key; unsigned/forged proposals are rejected.
+	types.SignBlock(b, n.priv)
 
 	// Self-apply then gossip so this node also runs full validation.
 	n.receiveBlock(n.Name, b)
@@ -248,7 +272,7 @@ func (n *Node) CastVote() *types.Vote {
 	if n.chain.Votes().HasVoted(h, n.Addr) {
 		return nil
 	}
-	v := types.SignVote(&types.Vote{Height: h, Voter: n.Addr, BlockHash: head.Hash})
+	v := types.SignVote(&types.Vote{Height: h, Voter: n.Addr, BlockHash: head.Hash}, n.priv)
 	n.receiveVote(n.Name, v)
 	n.net.Gossip(simnet.Message{Kind: simnet.MsgVote, From: n.Name, Vote: v})
 	n.infof("vote: h=%d block=%x stake=%d", h, head.Hash[:8], n.chain.StateOf(head).GetBalance(n.Addr))

@@ -17,9 +17,20 @@ type Set struct {
 }
 
 // NewSet builds a set; members are kept sorted by Address for determinism.
+//
+// Every validator must carry a PUBLIC key whose derived address equals Addr.
+// This is a startup-time configuration check: without it no node could
+// independently authenticate the validator's votes/proposals, so misconfigured
+// sets fail loudly rather than silently accepting unauthenticated messages.
 func NewSet(vs []*types.Validator) *Set {
 	cp := make([]*types.Validator, len(vs))
 	copy(cp, vs)
+	for _, v := range cp {
+		if len(v.PubKey) != types.PubLen || types.AddressOf(v.PubKey) != v.Addr {
+			panic("consensus: validator public key missing or not bound to its address: " +
+				string(v.Addr[:]))
+		}
+	}
 	sort.Slice(cp, func(i, j int) bool {
 		return bytes.Compare(cp[i].Addr[:], cp[j].Addr[:]) < 0
 	})
@@ -38,6 +49,15 @@ func NewSet(vs []*types.Validator) *Set {
 func (s *Set) Contains(addr types.Address) bool {
 	_, ok := s.byAddr[addr]
 	return ok
+}
+
+// PubKey returns the PUBLIC verification key of addr (nil if unknown). Other
+// nodes use solely this public information to verify the validator's messages.
+func (s *Set) PubKey(addr types.Address) []byte {
+	if v, ok := s.byAddr[addr]; ok {
+		return v.PubKey
+	}
+	return nil
 }
 
 // Stake returns the stake weight of addr (0 if unknown).

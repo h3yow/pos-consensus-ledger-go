@@ -1,8 +1,6 @@
 package consensus
 
 import (
-	"bytes"
-
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
 
@@ -17,9 +15,11 @@ type VotePool struct {
 	// byHeight maps height -> voter -> their recorded vote.
 	byHeight map[uint64]map[types.Address]*voteRecord
 	order    map[uint64][]*types.Vote // insertion order, deterministic replay
+	set      *Set                     // public keys for identity verification
 }
 
-// NewVotePool creates an empty vote pool.
+// NewVotePool creates an empty vote pool. The validator set is attached later
+// (at chain construction) and supplies every voter's PUBLIC key.
 func NewVotePool() *VotePool {
 	return &VotePool{
 		byHeight: make(map[uint64]map[types.Address]*voteRecord),
@@ -27,15 +27,25 @@ func NewVotePool() *VotePool {
 	}
 }
 
+// bindSet attaches the validator set used for signature verification.
+func (p *VotePool) bindSet(s *Set) { p.set = s }
+
 // AddVote records a vote. Rules:
-//   - signature must verify and the voter must claim itself consistently;
+//   - the voter MUST be in the validator set and the vote's Ed25519 signature
+//     MUST verify against that validator's PUBLIC key (and the key's derived
+//     address MUST equal the claimed Voter). Without the validator's private
+//     key nobody can forge such a vote;
 //   - an identical repeat (same height, same block hash) is a harmless
 //     re-broadcast: no error, no evidence;
 //   - a second vote for a DIFFERENT block hash at the same height is
 //     equivocation. The conflicting vote is retained and evidence is
 //     returned so a proposer can include it to slash the offender.
 func (p *VotePool) AddVote(v *types.Vote) (*types.Evidence, error) {
-	if !types.VerifyVote(v) {
+	if p.set == nil {
+		return nil, ErrBadVote
+	}
+	pub := p.set.PubKey(v.Voter)
+	if pub == nil || !types.VerifyVote(v, pub) {
 		return nil, ErrBadVote
 	}
 	at := p.byHeight[v.Height]
@@ -75,20 +85,34 @@ func (p *VotePool) HasVoted(h uint64, voter types.Address) bool {
 }
 
 // verifyEvidence checks that slashing evidence is well-formed and really
-// proves equivocation:
+// proves equivocation, using ONLY public information (the validator set):
 //   - "vote": two canonical votes by the same voter at one height for two
-//     different block hashes, both with valid signatures;
-//   - "propose": two canonical blocks at one height by the same proposer
-//     with distinct hashes.
-func verifyEvidence(ev *types.Evidence) error {
-	if ev == nil {
+//     different block hashes, each carrying an Ed25519 signature that verifies
+//     against that voter's PUBLIC key;
+//   - "propose": two signed canonical blocks at one height by the same
+//     proposer with distinct hashes, each carrying an Ed25519 signature that
+//     verifies against that proposer's PUBLIC key.
+//
+// Because signing requires the private key, an attacker cannot fabricate a
+// pair that "looks like" an honest validator double-signed: forged, tampered
+// or mismatched evidence is rejected with ErrEvidenceInvalid on every node,
+// and can never cause an honest validator to be slashed.
+func verifyEvidence(s *Set, ev *types.Evidence) error {
+	if ev == nil || s == nil {
 		return ErrEvidenceInvalid
+	}
+	pub := s.PubKey(ev.Offender)
+	if pub == nil {
+		return ErrEvidenceInvalid // offender must be a known validator
 	}
 	switch ev.Kind {
 	case "vote":
-		a, err1 := decodeVotePayload(ev.A)
-		b, err2 := decodeVotePayload(ev.B)
+		a, err1 := decodeSignedVote(ev.A)
+		b, err2 := decodeSignedVote(ev.B)
 		if err1 != nil || err2 != nil {
+			return ErrEvidenceInvalid
+		}
+		if !types.VerifyVote(a, pub) || !types.VerifyVote(b, pub) {
 			return ErrEvidenceInvalid
 		}
 		if a.Voter != ev.Offender || b.Voter != ev.Offender {
@@ -102,36 +126,27 @@ func verifyEvidence(ev *types.Evidence) error {
 		}
 		return nil
 	case "propose":
-		// Canonical block payloads must differ and must share height/proposer.
-		if len(ev.A) == 0 || len(ev.B) == 0 || bytes.Equal(ev.A, ev.B) {
+		a, err1 := decodeSignedBlock(ev.A)
+		b, err2 := decodeSignedBlock(ev.B)
+		if err1 != nil || err2 != nil {
 			return ErrEvidenceInvalid
 		}
-		a := decodeBlockHeader(ev.A)
-		b := decodeBlockHeader(ev.B)
-		if !a.ok || !b.ok {
+		if !types.VerifyBlock(a, pub) || !types.VerifyBlock(b, pub) {
 			return ErrEvidenceInvalid
 		}
-		if a.height != ev.Height || b.height != ev.Height {
+		if a.Height != ev.Height || b.Height != ev.Height {
 			return ErrEvidenceInvalid
 		}
-		if a.proposer != ev.Offender || b.proposer != ev.Offender {
+		if a.Proposer != ev.Offender || b.Proposer != ev.Offender {
 			return ErrEvidenceInvalid
 		}
-		if bytes.Equal(a.hash[:], b.hash[:]) {
+		if types.HashBlock(a) == types.HashBlock(b) {
 			return ErrEvidenceInvalid
 		}
 		return nil
 	default:
 		return ErrEvidenceInvalid
 	}
-}
-
-// decodedHeader is minimal header info parsed from a canonical block payload.
-type decodedHeader struct {
-	ok       bool
-	height   uint64
-	proposer types.Address
-	hash     types.Hash
 }
 
 // NewVoteEvidenceExport builds double-vote evidence from two signed votes.

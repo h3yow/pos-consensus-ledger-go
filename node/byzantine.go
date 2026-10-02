@@ -39,6 +39,9 @@ func (n *Node) ProduceBlockOn(parentHash types.Hash, txs []*types.Tx, evs []*typ
 		Evidence:     evs,
 		JustifyVotes: n.chain.Votes().VotesAt(parent.Block.Height),
 	}
+	// Signed with the proposer's own key, exactly like an honest proposal:
+	// double-propose evidence against it is therefore cryptographically valid.
+	types.SignBlock(b, n.priv)
 	return b
 }
 

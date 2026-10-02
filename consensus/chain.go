@@ -13,11 +13,12 @@ type BlockNode struct {
 	Hash   types.Hash
 	Parent *BlockNode
 
-	// state is the world state after executing this block; burn is the
-	// cumulative amount destroyed (fees + slashes) along this branch, so
-	// balance conservation can be audited: total(balance)+burn == genesis total.
-	state *state.State
-	burn  uint64
+	// state is the world state after executing this block; feeBurn is the
+	// cumulative fees destroyed along this branch (slashed stake is NOT
+	// destroyed — it moves to the protocol public account). Conservation:
+	// total(balance incl. protocol account)+feeBurn == genesis total.
+	state   *state.State
+	feeBurn uint64
 
 	justified bool // carries a valid 2/3+ quorum for itself
 	finalized bool
@@ -64,8 +65,12 @@ func (c *Chain) StateOf(n *BlockNode) *state.State { return n.state }
 // mempool reads for admission; block execution always uses clones).
 func (c *Chain) HeadState() *state.State { return c.Head().state }
 
-// BurnOn returns the cumulative burn along n's branch.
-func (c *Chain) BurnOn(n *BlockNode) uint64 { return n.burn }
+// FeeBurnOn returns the cumulative burned fees along n's branch.
+func (c *Chain) FeeBurnOn(n *BlockNode) uint64 { return n.feeBurn }
+
+// BurnOn is kept for compatibility; slashes no longer burn, so this equals
+// the cumulative burned fees.
+func (c *Chain) BurnOn(n *BlockNode) uint64 { return n.feeBurn }
 
 // AddVote forwards a vote to the pool and re-evaluates finalization.
 // Equivocation evidence (if any) is returned for inclusion in a block.
@@ -84,10 +89,13 @@ func (c *Chain) AddVote(v *types.Vote) (*types.Evidence, error) {
 //  1. duplicate block -> ErrDuplicateBlock (re-broadcast is harmless)
 //  2. parent must be known -> ErrUnknownParent
 //  3. proposer must match the weighted schedule -> ErrWrongProposer
-//  4. evidence must be well-formed -> ErrEvidenceInvalid
-//  5. parent justification must carry >=2/3 votes -> ErrJustification
-//  6. execution state root must match -> ErrBadStateRoot
-//  7. block must not conflict with finalized history -> ErrFinalizedReorg
+//  4. proposer signature must verify against the schedule's PUBLIC key
+//     -> ErrBadProposerSig
+//  5. evidence must be well-formed and signed by the offender's key
+//     -> ErrEvidenceInvalid
+//  6. parent justification must carry >=2/3 votes -> ErrJustification
+//  7. execution state root must match -> ErrBadStateRoot
+//  8. block must not conflict with finalized history -> ErrFinalizedReorg
 func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 	h := types.HashBlock(b)
 	if _, dup := c.nodes[h]; dup {
@@ -102,11 +110,19 @@ func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 	}
 	// Proposer schedule is defined by the genesis set layout; stake itself
 	// (voting weight) follows live state. The schedule ring is stable.
-	if want := c.set.ProposerAt(b.Height); want != b.Proposer {
+	want := c.set.ProposerAt(b.Height)
+	if want != b.Proposer {
 		return nil, ErrWrongProposer
 	}
+	// The proposal must be signed by the scheduled proposer's private key.
+	// Every node checks it against the PUBLIC key in the validator set, so a
+	// block claiming another identity (or carrying no/forged signature) is
+	// rejected identically everywhere.
+	if !types.VerifyBlock(b, c.set.PubKey(want)) {
+		return nil, ErrBadProposerSig
+	}
 	for _, ev := range b.Evidence {
-		if err := verifyEvidence(ev); err != nil {
+		if err := verifyEvidence(c.set, ev); err != nil {
 			return nil, err
 		}
 	}
@@ -127,16 +143,18 @@ func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 	// Deterministic execution: same block + same parent state on every node
 	// must produce the same resulting state root.
 	st := parent.state.Clone()
-	burn := parent.burn
+	feeBurn := parent.feeBurn
+	// Slashed stake moves to the network-wide protocol public account; it is
+	// part of the committed state, not of the burn counter.
 	for _, ev := range b.Evidence {
 		bal := st.GetBalance(ev.Offender)
-		burn += st.Slash(ev.Offender, bal/3)
+		st.Slash(ev.Offender, bal/3)
 	}
 	for _, t := range b.Txs {
 		if err := st.ApplyTx(t); err != nil {
 			return nil, err
 		}
-		burn += t.Fee
+		feeBurn += t.Fee
 	}
 	root := st.Root()
 	if !bytes.Equal(root[:], b.StateRoot[:]) {
@@ -145,7 +163,7 @@ func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 
 	n := &BlockNode{
 		Block: b, Hash: h, Parent: parent,
-		state: st, burn: burn,
+		state: st, feeBurn: feeBurn,
 	}
 	c.nodes[h] = n
 	c.children[parent.Hash] = append(c.children[parent.Hash], n)

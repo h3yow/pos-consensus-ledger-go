@@ -16,7 +16,7 @@ func TestPoolRejectAndOrder(t *testing.T) {
 	b[19] = 2
 	st.SetBalance(a, 1000)
 	st.SetBalance(b, 1000)
-	p := pool.New(st)
+	p := pool.New(st, 0)
 
 	mk := func(from types.Address, nonce, fee uint64) *types.Tx {
 		return types.SignTx(&types.Tx{From: from, To: b, Nonce: nonce, Value: 1, Fee: fee})
@@ -56,7 +56,7 @@ func TestPoolRejectAndOrder(t *testing.T) {
 	// Packing must also stay nonce-ordered within a sender: a0(t1), then a2
 	// cannot execute until a1 exists, so it is skipped for the block. Build a
 	// cleaner isolated pool to assert pure fee priority.
-	clean := pool.New(st)
+	clean := pool.New(st, 0)
 	clean.Add(hi) // b nonce0 fee50
 	clean.Add(types.SignTx(&types.Tx{From: a, To: b, Nonce: 0, Value: 1, Fee: 9}))
 	clean.Add(types.SignTx(&types.Tx{From: a, To: b, Nonce: 1, Value: 1, Fee: 5}))

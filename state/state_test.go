@@ -91,3 +91,45 @@ func TestStateRootDeterminism(t *testing.T) {
 		t.Fatal("different states must hash differently")
 	}
 }
+
+// TestSlashToProtocolAccount verifies slashing MOVES stake into the protocol
+// public account (supply is preserved), that the move changes the committed
+// state root, and that two nodes executing the same slash commit identically.
+func TestSlashToProtocolAccount(t *testing.T) {
+	var offender types.Address
+	offender[19] = 3
+	a := state.New()
+	a.SetBalance(offender, 1000)
+
+	before := a.TotalBalance()
+	rootBefore := a.Root()
+	moved := a.Slash(offender, 300)
+	if moved != 300 {
+		t.Fatalf("moved = %d, want 300", moved)
+	}
+	if got := a.GetBalance(offender); got != 700 {
+		t.Fatalf("offender = %d, want 700", got)
+	}
+	if got := a.GetBalance(state.ProtocolAccount); got != 300 {
+		t.Fatalf("protocol account = %d, want 300", got)
+	}
+	if a.TotalBalance() != before {
+		t.Fatalf("supply changed by slashing: before=%d after=%d", before, a.TotalBalance())
+	}
+	if a.Root() == rootBefore {
+		t.Fatal("slashing into the public account must change the state root")
+	}
+
+	// Cap at remaining balance; independent node commits the same root.
+	a.Slash(offender, 5000)
+	if a.GetBalance(offender) != 0 {
+		t.Fatal("slash must cap at the offender's remaining balance")
+	}
+	b := state.New()
+	b.SetBalance(offender, 1000)
+	b.Slash(offender, 300)
+	b.Slash(offender, 700)
+	if a.Root() != b.Root() {
+		t.Fatal("identical slash sequences must commit identical state roots")
+	}
+}

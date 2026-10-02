@@ -5,6 +5,7 @@ import (
 
 	"github.com/h3yow/pos-consensus-ledger-go/consensus"
 	"github.com/h3yow/pos-consensus-ledger-go/simnet"
+	"github.com/h3yow/pos-consensus-ledger-go/state"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
 
@@ -76,9 +77,11 @@ func TestDoubleVoteSlashing(t *testing.T) {
 	c.net.SendTo("D2", simnet.Message{Kind: simnet.MsgBlock, From: "S", Block: b2b})
 	c.net.DeliverAll()
 
-	// D equivocates: two votes, same height, different block hashes.
-	vWin := types.SignVote(&types.Vote{Height: 2, Voter: offender, BlockHash: winner})
-	vLose := types.SignVote(&types.Vote{Height: 2, Voter: offender, BlockHash: loser})
+	// D equivocates: two votes, same height, different block hashes. Both are
+	// signed by D's OWN key (the twin holds it); an attacker without that key
+	// could produce neither, which is exactly what the verification tests prove.
+	vWin := c.signVote(&types.Vote{Height: 2, Voter: offender, BlockHash: winner})
+	vLose := c.signVote(&types.Vote{Height: 2, Voter: offender, BlockHash: loser})
 	for _, nd := range c.nodes {
 		c.net.SendTo(nd.Name, simnet.Message{Kind: simnet.MsgVote, From: "BYZ", Vote: vWin})
 		c.net.SendTo(nd.Name, simnet.Message{Kind: simnet.MsgVote, From: "BYZ", Vote: vLose})
@@ -101,7 +104,7 @@ func TestDoubleVoteSlashing(t *testing.T) {
 	t.Logf("decision: double-vote by %x at h=2 recorded on all nodes", offender[:8])
 
 	genesisTotal := sumGenesis(c)
-	pre := c.nodes[0].StateAt().GetBalance(offender)
+	pre := c.gs.GetBalance(offender)
 
 	// Advance until the vote evidence is included on the canonical chain.
 	included := false
@@ -120,24 +123,56 @@ func TestDoubleVoteSlashing(t *testing.T) {
 	}
 	c.assertSameHead()
 
-	// Conservation on every node and exact 1/3 slash.
+	// The h=2 double-PROPOSE and the double-VOTE may target the same validator
+	// depending on the (address-sorted) schedule. Evidence executes in the
+	// canonical chain's application order; replay every slash of the offender
+	// from its genesis balance (heights low->high, evidence list order) to
+	// predict the final balance.
+	cur := pre
+	var anc []*consensus.BlockNode
+	for n := c.nodes[0].Chain().Head(); n != nil && n.Block.Height > 0; n = n.Parent {
+		anc = append(anc, n)
+	}
+	for i := len(anc) - 1; i >= 0; i-- {
+		var kinds []string
+		for _, ev := range anc[i].Block.Evidence {
+			if ev.Offender == offender {
+				kinds = append(kinds, ev.Kind)
+			}
+		}
+		for range kinds { // execution order: evidence list order
+			cur -= cur / 3
+		}
+		if len(kinds) > 0 {
+			t.Logf("decision: %x slashed at h=%d for %v -> running balance %d",
+				offender[:8], anc[i].Block.Height, kinds, cur)
+		}
+	}
+
+	// Conservation on every node and exact 1/3 slash. Slashed stake now lives
+	// in the protocol public account, so live total no longer drops: the audit
+	// is live(includes protocol account)+burned fees == genesis total.
 	for _, nd := range c.nodes {
 		live := nd.StateAt().TotalBalance()
-		burn := nd.Chain().BurnOn(nd.Chain().Head())
-		if live+burn != genesisTotal {
-			t.Fatalf("node %s conservation violated: live=%d burn=%d total=%d",
-				nd.Name, live, burn, genesisTotal)
+		feeBurn := nd.Chain().FeeBurnOn(nd.Chain().Head())
+		if live+feeBurn != genesisTotal {
+			t.Fatalf("node %s conservation violated: live=%d feeBurn=%d total=%d",
+				nd.Name, live, feeBurn, genesisTotal)
 		}
 	}
 	post := c.nodes[0].StateAt().GetBalance(offender)
-	if post != pre-pre/3 {
-		t.Fatalf("expected slash of 1/3: pre=%d post=%d want=%d", pre, post, pre-pre/3)
+	if post != cur {
+		t.Fatalf("expected sequential 1/3 slashes: post=%d want=%d", post, cur)
 	}
-	t.Logf("slashed %x: %d -> %d; live+burn=%d conserved on all nodes",
-		offender[:8], pre, post, genesisTotal)
+	if got := c.nodes[0].StateAt().GetBalance(state.ProtocolAccount); got != pre-post {
+		t.Fatalf("protocol public account = %d, want %d", got, pre-post)
+	}
+	t.Logf("slashed %x: %d -> %d; protocol account=%d; live+fees=%d conserved on all nodes",
+		offender[:8], pre, post, pre-post, genesisTotal)
 
 	// Forged/ill-formed evidence must never be accepted.
-	if err := consensus.VerifyEvidenceExport(&types.Evidence{
+	set := consensus.NewSet(c.vals)
+	if err := consensus.VerifyEvidenceExport(set, &types.Evidence{
 		Kind: "vote", Offender: addr(3), Height: 9,
 		A: []byte("junk"), B: []byte("jnuk"),
 	}); err == nil {

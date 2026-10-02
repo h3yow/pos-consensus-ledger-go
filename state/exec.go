@@ -17,8 +17,9 @@ import (
 //	ErrInsufficient -> balance cannot cover value+fee
 //
 // On success the sender pays value+fee, the receiver gains value and the
-// fee is burned (conservation is auditable via TotalBalance plus a burn
-// counter held by the block executor).
+// fee is burned per the protocol's existing convention (conservation is
+// auditable via TotalBalance plus a fee-burn counter held by the executor).
+// Slashed stake is never burned: it lands in ProtocolAccount.
 func (s *State) ApplyTx(t *types.Tx) error {
 	if !types.VerifyTx(t) {
 		return ErrBadSignature
@@ -47,9 +48,22 @@ func (s *State) ApplyTx(t *types.Tx) error {
 	return nil
 }
 
-// Slash removes slashAmount from the offender's balance and returns the
-// amount actually burned (capped at the offender's remaining balance so
-// balances never go negative).
+// ProtocolAccount is the network-wide, agreement-level public account that
+// receives every slash. It is the zero address: a protocol-level account no
+// private key can spend from. Slashed stake is moved there (not removed from
+// supply), so at every height and on every node:
+//
+//	sum(all balances, including ProtocolAccount) + burned fees == genesis total
+//
+// Because it is a regular state account, its balance is part of the state
+// commitment (state.Root), so all nodes commit to the same destination and
+// amount for every slash.
+var ProtocolAccount types.Address
+
+// Slash removes slashAmount from the offender's balance and CREDITS the same
+// amount to the protocol public account. Nothing is destroyed by slashing.
+// The amount is capped at the offender's remaining balance so balances never
+// go negative; the actually moved amount is returned.
 func (s *State) Slash(offender types.Address, slashAmount uint64) uint64 {
 	cur := s.GetBalance(offender)
 	if slashAmount > cur {
@@ -59,11 +73,13 @@ func (s *State) Slash(offender types.Address, slashAmount uint64) uint64 {
 		return 0
 	}
 	s.acct(offender).Balance -= slashAmount
+	s.acct(ProtocolAccount).Balance += slashAmount
 	return slashAmount
 }
 
-// TotalBalance returns the sum of all account balances. Combined with the
-// accumulated burn (fees + slashes) it must equal the genesis total.
+// TotalBalance returns the sum of every account balance, including the
+// protocol public account. Combined with accumulated burned fees it must
+// equal the genesis total.
 func (s *State) TotalBalance() uint64 {
 	var total uint64
 	for _, a := range s.accounts {

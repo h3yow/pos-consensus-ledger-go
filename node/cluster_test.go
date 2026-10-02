@@ -1,6 +1,7 @@
 package node_test
 
 import (
+	"crypto/ed25519"
 	"io"
 	"log"
 	"sync"
@@ -27,10 +28,13 @@ func (w *tWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// addr(i) = [0..0,i], a deterministic test identity.
+// addr(i) = identity-derived address for validator i (matches keyFor).
+// addr(99) returns the funded non-validator user address (userAddr).
 func addr(i byte) types.Address {
-	var a types.Address
-	a[19] = i
+	if i == 99 {
+		return userAddr(99)
+	}
+	a, _ := keyFor(i)
 	return a
 }
 
@@ -39,6 +43,7 @@ type cluster struct {
 	net   *simnet.Network
 	nodes []*node.Node
 	vals  []*types.Validator
+	keys  map[types.Address]ed25519.PrivateKey
 	g     *types.Block
 	gs    *state.State
 	logw  io.Writer
@@ -49,24 +54,33 @@ func newCluster(t *testing.T, n int, stakes ...uint64) *cluster {
 	w := &tWriter{t: t}
 	net := simnet.New()
 	vals := make([]*types.Validator, n)
+	keys := make(map[types.Address]ed25519.PrivateKey)
 	allocs := make([]consensus.GenesisAlloc, 0, n+1)
 	for i := 0; i < n; i++ {
 		stake := uint64(1000)
 		if i < len(stakes) {
 			stake = stakes[i]
 		}
-		vals[i] = &types.Validator{Addr: addr(byte(i + 1)), Stake: stake}
-		allocs = append(allocs, consensus.GenesisAlloc{Addr: addr(byte(i + 1)), Balance: stake})
+		a, priv := keyFor(byte(i + 1))
+		keys[a] = priv
+		vals[i] = &types.Validator{
+			Addr: a, Stake: stake,
+			PubKey: priv.Public().(ed25519.PublicKey),
+		}
+		allocs = append(allocs, consensus.GenesisAlloc{Addr: a, Balance: stake})
 	}
-	// a non-validator funded user
-	allocs = append(allocs, consensus.GenesisAlloc{Addr: addr(99), Balance: 5000})
+	// a non-validator funded user (address derived from its own deterministic
+	// key; transactions use the simulation tx signature)
+	user := userAddr(99)
+	allocs = append(allocs, consensus.GenesisAlloc{Addr: user, Balance: 5000})
 	g, gs := consensus.MakeGenesis(vals, allocs)
 
 	nodes := make([]*node.Node, n)
 	for i := range nodes {
 		nodes[i] = node.New(node.Config{
 			Name:         nameOf(i),
-			Addr:         addr(byte(i + 1)),
+			Addr:         vals[i].Addr,
+			PrivKey:      keys[vals[i].Addr],
 			Net:          net,
 			Vals:         vals,
 			Genesis:      g,
@@ -74,7 +88,32 @@ func newCluster(t *testing.T, n int, stakes ...uint64) *cluster {
 			Logger:       log.New(w, "", 0),
 		})
 	}
-	return &cluster{t: t, net: net, nodes: nodes, vals: vals, g: g, gs: gs, logw: w}
+	return &cluster{t: t, net: net, nodes: nodes, vals: vals, keys: keys, g: g, gs: gs, logw: w}
+}
+
+// keyFor derives validator identity i deterministically.
+func keyFor(i byte) (types.Address, ed25519.PrivateKey) {
+	priv := types.GenerateKey([]byte{0x76, 'v', 'a', 'l', i})
+	pub := priv.Public().(ed25519.PublicKey)
+	return types.AddressOf(pub), priv
+}
+
+// userAddr derives a non-validator user address.
+func userAddr(i byte) types.Address {
+	priv := types.GenerateKey([]byte{0x75, 'u', 's', 'r', i})
+	return types.AddressOf(priv.Public().(ed25519.PublicKey))
+}
+
+// signVote signs a consensus vote with the private key bound to voter; tests
+// use it both for honest votes and (with the offender's key) to construct
+// authentic equivocation — no honest key is ever used to forge another
+// validator's vote.
+func (c *cluster) signVote(v *types.Vote) *types.Vote {
+	priv, ok := c.keys[v.Voter]
+	if !ok {
+		c.t.Fatalf("no private key for voter %x", v.Voter[:8])
+	}
+	return types.SignVote(v, priv)
 }
 
 func nameOf(i int) string {

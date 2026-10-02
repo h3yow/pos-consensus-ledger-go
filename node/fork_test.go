@@ -114,13 +114,16 @@ func TestForkConvergence(t *testing.T) {
 	}
 	conflict.JustifyVotes = nil // height-3 block needs justification for loser
 	for i := 0; i < 4; i++ {
-		v := types.SignVote(&types.Vote{
+		v := c.signVote(&types.Vote{
 			Height:    loser.Height,
 			Voter:     c.nodes[i].Addr,
 			BlockHash: types.HashBlock(loser),
 		})
 		conflict.JustifyVotes = append(conflict.JustifyVotes, v)
 	}
+	// JustifyVotes are part of the signed canonical block: re-sign with the
+	// (Byzantine) proposer's own key after assembling them.
+	types.SignBlock(conflict, twin.nd.PrivKey())
 	err := c.nodes[0].AddBlockDirect(conflict)
 	if !errors.Is(err, consensus.ErrFinalizedReorg) {
 		t.Fatalf("expected ErrFinalizedReorg, got %v", err)
