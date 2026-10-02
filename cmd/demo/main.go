@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/h3yow/pos-consensus-ledger-go/consensus"
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/node"
 	"github.com/h3yow/pos-consensus-ledger-go/simnet"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
@@ -27,17 +28,20 @@ func main() {
 	vals := make([]*types.Validator, N)
 	allocs := make([]consensus.GenesisAlloc, 0, N+1)
 	for i := 0; i < N; i++ {
-		vals[i] = &types.Validator{Addr: addr(byte(i + 1)), Stake: 1000}
-		allocs = append(allocs, consensus.GenesisAlloc{Addr: addr(byte(i + 1)), Balance: 1000})
+		a := addr(byte(i + 1))
+		vals[i] = &types.Validator{Addr: a, Stake: 1000, PubKey: identity.PublicKeyFor(a)}
+		allocs = append(allocs, consensus.GenesisAlloc{Addr: a, Balance: 1000})
 	}
 	allocs = append(allocs, consensus.GenesisAlloc{Addr: addr(99), Balance: 5000})
 	genesis, gs := consensus.MakeGenesis(vals, allocs)
 
 	nodes := make([]*node.Node, N)
 	for i := range nodes {
+		a := addr(byte(i + 1))
 		nodes[i] = node.New(node.Config{
-			Name: string(rune('A' + i)), Addr: addr(byte(i + 1)),
-			Net: net, Vals: vals, Genesis: genesis, GenesisState: gs, Logger: logger,
+			Name: string(rune('A' + i)), Addr: a,
+			Net: net, Vals: vals, Genesis: genesis, GenesisState: gs,
+			PrivKey: identity.PrivateKeyFor(a), Logger: logger,
 		})
 	}
 
@@ -86,11 +90,14 @@ func main() {
 	fmt.Printf("state root        : %x\n", root[:])
 	fmt.Printf("all nodes agree   : %v\n", agree)
 
-	// Balance + burn conservation.
-	live := nodes[0].StateAt().TotalBalance()
+	// Balance conservation: slashes move into the public treasury (still a
+	// live balance), only fees are burned.
+	st := nodes[0].StateAt()
+	live := st.TotalBalance()
+	treasury := st.TreasuryBalance()
 	burn := nodes[0].Chain().BurnOn(nodes[0].Chain().Head())
-	fmt.Printf("live balances     : %d\n", live)
-	fmt.Printf("burned (fee+slash): %d\n", burn)
+	fmt.Printf("live balances     : %d (incl. public treasury %d)\n", live, treasury)
+	fmt.Printf("burned (fees only): %d\n", burn)
 	fmt.Printf("genesis total     : 9000 (conservation: %v)\n", live+burn == 9000)
 }
 

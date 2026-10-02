@@ -30,6 +30,6 @@ func MakeGenesis(vals []*types.Validator, allocs []GenesisAlloc) (*types.Block, 
 // NewChainWithSet creates a chain bound to a validator set.
 func NewChainWithSet(vals []*types.Validator, genesis *types.Block, genesisState *state.State) *Chain {
 	c := NewChain(genesis, genesisState)
-	c.set = NewSet(vals)
+	c.bindSet(NewSet(vals))
 	return c
 }

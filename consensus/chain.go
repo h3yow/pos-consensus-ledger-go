@@ -14,8 +14,10 @@ type BlockNode struct {
 	Parent *BlockNode
 
 	// state is the world state after executing this block; burn is the
-	// cumulative amount destroyed (fees + slashes) along this branch, so
-	// balance conservation can be audited: total(balance)+burn == genesis total.
+	// cumulative amount destroyed by fees along this branch. Slashed stake
+	// is not burned: it is moved into state.PublicTreasury, so balance
+	// conservation audits as total(balance incl. treasury)+feeBurn ==
+	// genesis total.
 	state *state.State
 	burn  uint64
 
@@ -46,9 +48,16 @@ func NewChain(genesis *types.Block, genesisState *state.State) *Chain {
 		genesis:   g,
 		nodes:     map[types.Hash]*BlockNode{g.Hash: g},
 		children:  make(map[types.Hash][]*BlockNode),
-		votes:     NewVotePool(),
+		votes:     NewVotePool(NewSet(nil)),
 		finalized: g,
 	}
+}
+
+// bindSet installs the validator set and a matching signature-checking vote
+// pool. Called by NewChainWithSet once genesis validators are known.
+func (c *Chain) bindSet(s *Set) {
+	c.set = s
+	c.votes = NewVotePool(s)
 }
 
 // Genesis returns the genesis node.
@@ -56,6 +65,9 @@ func (c *Chain) Genesis() *BlockNode { return c.genesis }
 
 // Votes exposes the chain's vote pool (driving votes & finalization).
 func (c *Chain) Votes() *VotePool { return c.votes }
+
+// Set exposes the genesis validator set (keys, schedule, stake).
+func (c *Chain) Set() *Set { return c.set }
 
 // StateOf returns the post-state of a stored block.
 func (c *Chain) StateOf(n *BlockNode) *state.State { return n.state }
@@ -84,10 +96,13 @@ func (c *Chain) AddVote(v *types.Vote) (*types.Evidence, error) {
 //  1. duplicate block -> ErrDuplicateBlock (re-broadcast is harmless)
 //  2. parent must be known -> ErrUnknownParent
 //  3. proposer must match the weighted schedule -> ErrWrongProposer
-//  4. evidence must be well-formed -> ErrEvidenceInvalid
-//  5. parent justification must carry >=2/3 votes -> ErrJustification
-//  6. execution state root must match -> ErrBadStateRoot
-//  7. block must not conflict with finalized history -> ErrFinalizedReorg
+//  4. proposer signature must verify against the scheduled proposer's
+//     genesis public key -> ErrBadProposerSig
+//  5. evidence must be well-formed and signed by the claimed offender
+//     -> ErrEvidenceInvalid
+//  6. parent justification must carry >=2/3 votes -> ErrJustification
+//  7. execution state root must match -> ErrBadStateRoot
+//  8. block must not conflict with finalized history -> ErrFinalizedReorg
 func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 	h := types.HashBlock(b)
 	if _, dup := c.nodes[h]; dup {
@@ -105,8 +120,14 @@ func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 	if want := c.set.ProposerAt(b.Height); want != b.Proposer {
 		return nil, ErrWrongProposer
 	}
+	// The proposal must be signed by the scheduled proposer's private key.
+	// Without it an attacker cannot author valid blocks at that height nor
+	// frame the proposer with double-propose evidence.
+	if !c.set.VerifyBlock(b) {
+		return nil, ErrBadProposerSig
+	}
 	for _, ev := range b.Evidence {
-		if err := verifyEvidence(ev); err != nil {
+		if err := c.set.verifyEvidence(ev); err != nil {
 			return nil, err
 		}
 	}
@@ -128,15 +149,17 @@ func (c *Chain) AddBlock(b *types.Block) (*BlockNode, error) {
 	// must produce the same resulting state root.
 	st := parent.state.Clone()
 	burn := parent.burn
+	// Slashed stake is transferred into the protocol public treasury (not
+	// destroyed), so it contributes nothing to feeBurn.
 	for _, ev := range b.Evidence {
 		bal := st.GetBalance(ev.Offender)
-		burn += st.Slash(ev.Offender, bal/3)
+		st.Slash(ev.Offender, bal/3)
 	}
 	for _, t := range b.Txs {
 		if err := st.ApplyTx(t); err != nil {
 			return nil, err
 		}
-		burn += t.Fee
+		burn += t.Fee // fees are the only quantity actually burned
 	}
 	root := st.Root()
 	if !bytes.Equal(root[:], b.StateRoot[:]) {

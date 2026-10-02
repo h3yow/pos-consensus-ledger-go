@@ -4,13 +4,14 @@ import (
 	"testing"
 
 	"github.com/h3yow/pos-consensus-ledger-go/consensus"
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
 
 func v(i byte, stake uint64) *types.Validator {
 	var a types.Address
 	a[19] = i
-	return &types.Validator{Addr: a, Stake: stake}
+	return &types.Validator{Addr: a, Stake: stake, PubKey: identity.PublicKeyFor(a)}
 }
 
 // TestWeightedRoundRobin: a 3x staker proposes ~3x as often and the schedule
@@ -68,17 +69,19 @@ func TestEvidenceVerification(t *testing.T) {
 	var h1, h2 types.Hash
 	h1[0] = 1
 	h2[0] = 2
-	va := types.SignVote(&types.Vote{Height: 5, Voter: offender, BlockHash: h1})
-	vb := types.SignVote(&types.Vote{Height: 5, Voter: offender, BlockHash: h2})
+	priv := identity.PrivateKeyFor(offender)
+	va := identity.SignVote(&types.Vote{Height: 5, Voter: offender, BlockHash: h1}, priv)
+	vb := identity.SignVote(&types.Vote{Height: 5, Voter: offender, BlockHash: h2}, priv)
+	set := consensus.NewSet([]*types.Validator{v(7, 10)})
 
 	ev := consensus.NewVoteEvidenceExport(va, vb)
-	if err := consensus.VerifyEvidenceExport(ev); err != nil {
+	if err := set.VerifyEvidenceExport(ev); err != nil {
 		t.Fatalf("valid double-vote evidence rejected: %v", err)
 	}
 
 	// Same target hash is not equivocation.
 	same := consensus.NewVoteEvidenceExport(va, va)
-	if err := consensus.VerifyEvidenceExport(same); err == nil {
+	if err := set.VerifyEvidenceExport(same); err == nil {
 		t.Fatal("identical votes must not be slashable evidence")
 	}
 
@@ -86,7 +89,18 @@ func TestEvidenceVerification(t *testing.T) {
 	vbBad := *vb
 	vbBad.Sig[0] ^= 0xFF
 	bad := consensus.NewVoteEvidenceExport(va, &vbBad)
-	if err := consensus.VerifyEvidenceExport(bad); err == nil {
+	if err := set.VerifyEvidenceExport(bad); err == nil {
 		t.Fatal("forged evidence with bad signature accepted")
+	}
+
+	// Evidence with the offender field swapped onto an honest validator must
+	// fail: the votes are signed by offender[7], not by the claimed offender.
+	var honest types.Address
+	honest[19] = 8
+	set2 := consensus.NewSet([]*types.Validator{v(7, 10), v(8, 10)})
+	framed := consensus.NewVoteEvidenceExport(va, vb)
+	framed.Offender = honest
+	if err := set2.VerifyEvidenceExport(framed); err == nil {
+		t.Fatal("evidence with mismatched offender must be rejected")
 	}
 }

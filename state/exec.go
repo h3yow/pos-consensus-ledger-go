@@ -47,9 +47,25 @@ func (s *State) ApplyTx(t *types.Tx) error {
 	return nil
 }
 
-// Slash removes slashAmount from the offender's balance and returns the
-// amount actually burned (capped at the offender's remaining balance so
-// balances never go negative).
+// PublicTreasury is the single protocol-level account that receives every
+// slashing penalty. It is a fixed well-known address identical on every
+// node, so all nodes credit the same destination and agree on its balance
+// through the state commitment. The address is outside the validator/user
+// address space used by the simulation.
+var PublicTreasury = types.Address{
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff,
+}
+
+// Slash removes slashAmount from the offender's balance and transfers it to
+// PublicTreasury, returning the amount actually moved (capped at the
+// offender's remaining balance so balances never go negative).
+//
+// Nothing is destroyed by a slash: it moves stake from the offender to the
+// network-wide public account. Conservation therefore stays exact, the
+// treasury balance is part of the state root, and the offender's live
+// balance — which is also its voting weight — drops by the same amount.
 func (s *State) Slash(offender types.Address, slashAmount uint64) uint64 {
 	cur := s.GetBalance(offender)
 	if slashAmount > cur {
@@ -59,11 +75,18 @@ func (s *State) Slash(offender types.Address, slashAmount uint64) uint64 {
 		return 0
 	}
 	s.acct(offender).Balance -= slashAmount
+	s.acct(PublicTreasury).Balance += slashAmount
 	return slashAmount
 }
 
-// TotalBalance returns the sum of all account balances. Combined with the
-// accumulated burn (fees + slashes) it must equal the genesis total.
+// TreasuryBalance returns the balance held by the protocol public account.
+func (s *State) TreasuryBalance() uint64 {
+	return s.GetBalance(PublicTreasury)
+}
+
+// TotalBalance returns the sum of all account balances, including the public
+// treasury. Combined with the accumulated fee burn it must equal the genesis
+// total: slashes only move value, fees are the only quantity destroyed.
 func (s *State) TotalBalance() uint64 {
 	var total uint64
 	for _, a := range s.accounts {

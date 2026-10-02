@@ -8,10 +8,14 @@ type Address [20]byte
 // Hash is a 32-byte SHA-256 digest.
 type Hash [32]byte
 
-// Validator is a member of the genesis validator set.
+// Validator is a member of the genesis validator set. PubKey is the
+// 32-byte Ed25519 public key other nodes use to verify this validator's
+// votes and block proposals; the corresponding private key never leaves
+// the validator's own node.
 type Validator struct {
-	Addr  Address
-	Stake uint64
+	Addr   Address
+	Stake  uint64
+	PubKey []byte
 }
 
 // Tx is a simple value-transfer transaction with a per-sender nonce.
@@ -37,6 +41,13 @@ type Evidence struct {
 }
 
 // Block is produced by the scheduled validator of a height.
+//
+// ProposerSig is the proposer's Ed25519 signature over the sig-excluding
+// canonical block encoding (CanonicalBlock). It cryptographically binds the
+// proposal to the scheduled validator: nobody else can produce a valid
+// signature, and double-propose evidence is provably authored by that
+// proposer on every node. The signature is excluded from the block hash so
+// that block identity stays the hash of the signed payload (no malleability).
 type Block struct {
 	Height       uint64
 	Proposer     Address
@@ -45,9 +56,12 @@ type Block struct {
 	Txs          []*Tx
 	Evidence     []*Evidence
 	JustifyVotes []*Vote // >=2/3 stake votes for the parent block
+	ProposerSig  []byte
 }
 
 // Vote is a validator's vote that a block at Height/BlockHash is canonical.
+// Sig is an Ed25519 signature by the voter over CanonicalVote, verifiable
+// against the voter's PubKey published in the validator set.
 type Vote struct {
 	Height    uint64
 	Voter     Address

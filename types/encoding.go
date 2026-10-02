@@ -65,7 +65,8 @@ func VerifyTx(t *Tx) bool {
 	return string(t.Sig) == string(want[:])
 }
 
-// CanonicalVote encodes a vote deterministically.
+// CanonicalVote encodes a vote deterministically. The bytes are the message
+// that the voter signs with its Ed25519 private key (see identity.SignVote).
 func CanonicalVote(v *Vote) []byte {
 	var e enc
 	e.u64(v.Height)
@@ -77,24 +78,11 @@ func CanonicalVote(v *Vote) []byte {
 // HashVote returns the canonical digest of a vote.
 func HashVote(v *Vote) Hash { return HashBytes(CanonicalVote(v)) }
 
-// SignVote fills in the vote signature.
-func SignVote(v *Vote) *Vote {
-	d := HashVote(v)
-	v.Sig = d[:]
-	return v
-}
-
-// VerifyVote checks a vote signature.
-func VerifyVote(v *Vote) bool {
-	if len(v.Sig) != 32 {
-		return false
-	}
-	want := HashVote(v)
-	return string(v.Sig) == string(want[:])
-}
-
-// CanonicalBlock encodes a block deterministically. Two blocks are "the same
-// block" (safe under duplicate broadcast) iff their encodings are identical.
+// CanonicalBlock encodes a block deterministically, EXCLUDING ProposerSig.
+// Two blocks are "the same block" (safe under duplicate broadcast) iff their
+// encodings are identical. The same bytes are signed by the proposer
+// (identity.SignBlock), so the block hash commits to exactly the signed
+// payload; the signature itself cannot be malleated into a second identity.
 func CanonicalBlock(b *Block) []byte {
 	var e enc
 	e.u64(b.Height)

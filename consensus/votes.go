@@ -1,41 +1,48 @@
 package consensus
 
 import (
-	"bytes"
-
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
 
 // voteRecord keeps a stored vote and its evidence payload.
 type voteRecord struct {
 	vote *types.Vote
-	raw  []byte // canonical encoding, for evidence construction
+	raw  []byte // canonical encoding + signature, for evidence construction
 }
 
-// VotePool keeps votes per height and detects equivocation.
+// VotePool keeps votes per height and detects equivocation. Every vote is
+// authenticated against the validator set's public keys before it is stored.
 type VotePool struct {
+	set *Set
 	// byHeight maps height -> voter -> their recorded vote.
 	byHeight map[uint64]map[types.Address]*voteRecord
 	order    map[uint64][]*types.Vote // insertion order, deterministic replay
 }
 
-// NewVotePool creates an empty vote pool.
-func NewVotePool() *VotePool {
+// NewVotePool creates an empty vote pool bound to the validator set whose
+// public keys authenticate every incoming vote.
+func NewVotePool(set *Set) *VotePool {
 	return &VotePool{
+		set:      set,
 		byHeight: make(map[uint64]map[types.Address]*voteRecord),
 		order:    make(map[uint64][]*types.Vote),
 	}
 }
 
+// NewVotePoolExport exposes the constructor for external tests.
+func NewVotePoolExport(set *Set) *VotePool { return NewVotePool(set) }
+
 // AddVote records a vote. Rules:
-//   - signature must verify and the voter must claim itself consistently;
+//   - the signature must verify against the voter's genesis public key,
+//     otherwise the vote is rejected (unknown voter is the same failure:
+//     no public key can authenticate it);
 //   - an identical repeat (same height, same block hash) is a harmless
 //     re-broadcast: no error, no evidence;
 //   - a second vote for a DIFFERENT block hash at the same height is
 //     equivocation. The conflicting vote is retained and evidence is
 //     returned so a proposer can include it to slash the offender.
 func (p *VotePool) AddVote(v *types.Vote) (*types.Evidence, error) {
-	if !types.VerifyVote(v) {
+	if !p.set.VerifyVote(v) {
 		return nil, ErrBadVote
 	}
 	at := p.byHeight[v.Height]
@@ -72,66 +79,6 @@ func (p *VotePool) VotesAt(h uint64) []*types.Vote {
 func (p *VotePool) HasVoted(h uint64, voter types.Address) bool {
 	_, ok := p.byHeight[h][voter]
 	return ok
-}
-
-// verifyEvidence checks that slashing evidence is well-formed and really
-// proves equivocation:
-//   - "vote": two canonical votes by the same voter at one height for two
-//     different block hashes, both with valid signatures;
-//   - "propose": two canonical blocks at one height by the same proposer
-//     with distinct hashes.
-func verifyEvidence(ev *types.Evidence) error {
-	if ev == nil {
-		return ErrEvidenceInvalid
-	}
-	switch ev.Kind {
-	case "vote":
-		a, err1 := decodeVotePayload(ev.A)
-		b, err2 := decodeVotePayload(ev.B)
-		if err1 != nil || err2 != nil {
-			return ErrEvidenceInvalid
-		}
-		if a.Voter != ev.Offender || b.Voter != ev.Offender {
-			return ErrEvidenceInvalid
-		}
-		if a.Height != ev.Height || b.Height != ev.Height {
-			return ErrEvidenceInvalid
-		}
-		if a.BlockHash == b.BlockHash {
-			return ErrEvidenceInvalid
-		}
-		return nil
-	case "propose":
-		// Canonical block payloads must differ and must share height/proposer.
-		if len(ev.A) == 0 || len(ev.B) == 0 || bytes.Equal(ev.A, ev.B) {
-			return ErrEvidenceInvalid
-		}
-		a := decodeBlockHeader(ev.A)
-		b := decodeBlockHeader(ev.B)
-		if !a.ok || !b.ok {
-			return ErrEvidenceInvalid
-		}
-		if a.height != ev.Height || b.height != ev.Height {
-			return ErrEvidenceInvalid
-		}
-		if a.proposer != ev.Offender || b.proposer != ev.Offender {
-			return ErrEvidenceInvalid
-		}
-		if bytes.Equal(a.hash[:], b.hash[:]) {
-			return ErrEvidenceInvalid
-		}
-		return nil
-	default:
-		return ErrEvidenceInvalid
-	}
-}
-
-// decodedHeader is minimal header info parsed from a canonical block payload.
-type decodedHeader struct {
-	ok       bool
-	height   uint64
-	proposer types.Address
-	hash     types.Hash
 }
 
 // NewVoteEvidenceExport builds double-vote evidence from two signed votes.

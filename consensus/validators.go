@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"sort"
 
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
 
-// Set is the validator set with weighted stake.
+// Set is the validator set with weighted stake and the public verification
+// keys published at genesis. It doubles as the protocol's PKI: every node
+// looks up a validator's key here and independently verifies its signatures.
 type Set struct {
 	validators []*types.Validator
 	byAddr     map[types.Address]*types.Validator
@@ -17,6 +20,8 @@ type Set struct {
 }
 
 // NewSet builds a set; members are kept sorted by Address for determinism.
+// Each validator must carry its 32-byte Ed25519 public key (defensive: a
+// nil/short key is stored but every signature then fails verification).
 func NewSet(vs []*types.Validator) *Set {
 	cp := make([]*types.Validator, len(vs))
 	copy(cp, vs)
@@ -38,6 +43,43 @@ func NewSet(vs []*types.Validator) *Set {
 func (s *Set) Contains(addr types.Address) bool {
 	_, ok := s.byAddr[addr]
 	return ok
+}
+
+// PubKey returns the genesis-published public key of addr (nil if unknown).
+func (s *Set) PubKey(addr types.Address) []byte {
+	if v, ok := s.byAddr[addr]; ok {
+		return v.PubKey
+	}
+	return nil
+}
+
+// VerifyVote independently verifies a vote against the voter's published
+// public key. Unknown voters and bad/absent signatures all fail.
+func (s *Set) VerifyVote(v *types.Vote) bool {
+	if v == nil {
+		return false
+	}
+	val, ok := s.byAddr[v.Voter]
+	if !ok {
+		return false
+	}
+	return identity.VerifyVote(v, val.PubKey)
+}
+
+// VerifyBlock independently verifies the proposer signature of a non-genesis
+// block against the scheduled proposer's published public key.
+func (s *Set) VerifyBlock(b *types.Block) bool {
+	if b == nil {
+		return false
+	}
+	if b.Height == 0 && b.Proposer == (types.Address{}) {
+		return identity.VerifyBlock(b, nil)
+	}
+	val, ok := s.byAddr[b.Proposer]
+	if !ok {
+		return false
+	}
+	return identity.VerifyBlock(b, val.PubKey)
 }
 
 // Stake returns the stake weight of addr (0 if unknown).

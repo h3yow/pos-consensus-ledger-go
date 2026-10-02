@@ -1,6 +1,7 @@
 package node
 
 import (
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/simnet"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
@@ -39,6 +40,10 @@ func (n *Node) ProduceBlockOn(parentHash types.Hash, txs []*types.Tx, evs []*typ
 		Evidence:     evs,
 		JustifyVotes: n.chain.Votes().VotesAt(parent.Block.Height),
 	}
+	// The twin shares the proposer's key, so the competing proposal carries a
+	// genuine signature: this is exactly what makes double-propose evidence
+	// verifiable — an outsider cannot build one.
+	identity.SignBlock(b, n.priv)
 	return b
 }
 
@@ -56,6 +61,15 @@ func (n *Node) GossipBlock(b *types.Block, recipients ...string) {
 func (n *Node) VotesAt(h uint64) []*types.Vote {
 	return n.chain.Votes().VotesAt(h)
 }
+
+// OrderedExport returns the transactions this node would currently pack, in
+// deterministic order (test helper).
+func (n *Node) OrderedExport(limit int) []*types.Tx {
+	return n.pool.Ordered(limit)
+}
+
+// PoolSizeExport reports the current pending count (test helper).
+func (n *Node) PoolSizeExport() int { return n.pool.Size() }
 
 // AddBlockDirect feeds an already-built block straight into this node's
 // chain and returns the validation error (test helper).

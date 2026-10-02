@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/h3yow/pos-consensus-ledger-go/consensus"
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/simnet"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
@@ -114,13 +115,14 @@ func TestForkConvergence(t *testing.T) {
 	}
 	conflict.JustifyVotes = nil // height-3 block needs justification for loser
 	for i := 0; i < 4; i++ {
-		v := types.SignVote(&types.Vote{
-			Height:    loser.Height,
-			Voter:     c.nodes[i].Addr,
-			BlockHash: types.HashBlock(loser),
-		})
+		v := signVoteAs(c.nodes[i].Addr, loser.Height, types.HashBlock(loser))
 		conflict.JustifyVotes = append(conflict.JustifyVotes, v)
 	}
+	// Attaching the justification changes the signed body, so the proposer
+	// (here its key-holding twin) re-signs. This makes the block signature
+	// valid on purpose so that finality protection, not authentication, is
+	// what rejects it.
+	identity.SignBlock(conflict, identity.PrivateKeyFor(conflict.Proposer))
 	err := c.nodes[0].AddBlockDirect(conflict)
 	if !errors.Is(err, consensus.ErrFinalizedReorg) {
 		t.Fatalf("expected ErrFinalizedReorg, got %v", err)

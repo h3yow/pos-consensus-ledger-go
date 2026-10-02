@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/node"
 	"github.com/h3yow/pos-consensus-ledger-go/types"
 )
@@ -18,6 +19,14 @@ func newNode(c *cluster, nm string, a types.Address) *node.Node {
 	return node.New(node.Config{
 		Name: nm, Addr: a, Net: c.net, Vals: c.vals,
 		Genesis: c.g, GenesisState: c.gs,
-		Logger: log.New(w, "", 0),
+		PrivKey: identity.PrivateKeyFor(a),
+		Logger:  log.New(w, "", 0),
 	})
+}
+
+// signVoteAs signs a vote with the derived private key of voter, exactly as
+// the holder of that validator's key could do (e.g. an equivocating twin).
+func signVoteAs(voter types.Address, height uint64, block types.Hash) *types.Vote {
+	return identity.SignVote(&types.Vote{Height: height, Voter: voter, BlockHash: block},
+		identity.PrivateKeyFor(voter))
 }

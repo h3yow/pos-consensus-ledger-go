@@ -76,9 +76,11 @@ func TestDoubleVoteSlashing(t *testing.T) {
 	c.net.SendTo("D2", simnet.Message{Kind: simnet.MsgBlock, From: "S", Block: b2b})
 	c.net.DeliverAll()
 
-	// D equivocates: two votes, same height, different block hashes.
-	vWin := types.SignVote(&types.Vote{Height: 2, Voter: offender, BlockHash: winner})
-	vLose := types.SignVote(&types.Vote{Height: 2, Voter: offender, BlockHash: loser})
+	// D equivocates: two votes, same height, different block hashes. Both
+	// carry signatures made with D's own key (the only way evidence can be
+	// valid); no other party could have produced them.
+	vWin := signVoteAs(offender, 2, winner)
+	vLose := signVoteAs(offender, 2, loser)
 	for _, nd := range c.nodes {
 		c.net.SendTo(nd.Name, simnet.Message{Kind: simnet.MsgVote, From: "BYZ", Vote: vWin})
 		c.net.SendTo(nd.Name, simnet.Message{Kind: simnet.MsgVote, From: "BYZ", Vote: vLose})
@@ -120,7 +122,9 @@ func TestDoubleVoteSlashing(t *testing.T) {
 	}
 	c.assertSameHead()
 
-	// Conservation on every node and exact 1/3 slash.
+	// Conservation on every node and exact 1/3 slash. Slashed stake now lives
+	// in the protocol public treasury, so TotalBalance (which includes it)
+	// plus the fee burn still equals the genesis total.
 	for _, nd := range c.nodes {
 		live := nd.StateAt().TotalBalance()
 		burn := nd.Chain().BurnOn(nd.Chain().Head())
@@ -133,11 +137,33 @@ func TestDoubleVoteSlashing(t *testing.T) {
 	if post != pre-pre/3 {
 		t.Fatalf("expected slash of 1/3: pre=%d post=%d want=%d", pre, post, pre-pre/3)
 	}
-	t.Logf("slashed %x: %d -> %d; live+burn=%d conserved on all nodes",
-		offender[:8], pre, post, genesisTotal)
+	treasury := c.nodes[0].StateAt().TreasuryBalance()
+	// The canonical h=3 block contains two distinct offences:
+	//   - double propose by the scheduled h=2 proposer (proposerOffender)
+	//   - double vote by D (offender)
+	// Each costs 1/3 of the offender's own balance, and every slashed coin
+	// lands in the single protocol treasury.
+	proposerOffender := b2a.Proposer
+	// The proposer may already have received a value transfer in the winning
+	// h=2 block, so its pre-slash balance is read from the parent (h=2) state
+	// rather than assumed to be the genesis 1000.
+	head := c.nodes[0].Chain().Head()
+	proPre := c.nodes[0].Chain().StateOf(head.Parent).GetBalance(proposerOffender)
+	proPost := c.nodes[0].StateAt().GetBalance(proposerOffender)
+	if proPost != proPre-proPre/3 {
+		t.Fatalf("proposer slash: pre=%d post=%d want=%d", proPre, proPost, proPre-proPre/3)
+	}
+	wantTreasury := (pre - post) + (proPre - proPost)
+	if treasury != wantTreasury {
+		t.Fatalf("treasury should hold %d (voter %d + proposer %d), got %d",
+			wantTreasury, pre-post, proPre-proPost, treasury)
+	}
+	t.Logf("slashed proposer %x %d -> %d and voter %x %d -> %d; treasury=%d; conservation holds on all nodes",
+		proposerOffender[:8], proPre, proPost, offender[:8], pre, post, treasury)
 
-	// Forged/ill-formed evidence must never be accepted.
-	if err := consensus.VerifyEvidenceExport(&types.Evidence{
+	// Forged/ill-formed evidence must never be accepted by any node's set.
+	set := consensus.NewSet(c.vals)
+	if err := set.VerifyEvidenceExport(&types.Evidence{
 		Kind: "vote", Offender: addr(3), Height: 9,
 		A: []byte("junk"), B: []byte("jnuk"),
 	}); err == nil {

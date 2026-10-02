@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/h3yow/pos-consensus-ledger-go/consensus"
+	"github.com/h3yow/pos-consensus-ledger-go/identity"
 	"github.com/h3yow/pos-consensus-ledger-go/node"
 	"github.com/h3yow/pos-consensus-ledger-go/simnet"
 	"github.com/h3yow/pos-consensus-ledger-go/state"
@@ -55,7 +56,11 @@ func newCluster(t *testing.T, n int, stakes ...uint64) *cluster {
 		if i < len(stakes) {
 			stake = stakes[i]
 		}
-		vals[i] = &types.Validator{Addr: addr(byte(i + 1)), Stake: stake}
+		vals[i] = &types.Validator{
+			Addr:   addr(byte(i + 1)),
+			Stake:  stake,
+			PubKey: identity.PublicKeyFor(addr(byte(i + 1))),
+		}
 		allocs = append(allocs, consensus.GenesisAlloc{Addr: addr(byte(i + 1)), Balance: stake})
 	}
 	// a non-validator funded user
