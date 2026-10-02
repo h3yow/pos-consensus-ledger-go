@@ -133,10 +133,18 @@ go test ./... -race        # 含并发压力的竞态检测
            仍相同按交易哈希排序（保证比较是全序、确定）
   ```
 
-- **序号连续性硬约束**：只有"某个发送者当前等待中的**最大 nonce**"才允许被淘汰
-  （淘汰尾巴不会制造断档）。中间/低序号交易即使全局手续费最低也被保护；搜索会跳过
-  它们，去淘汰"可淘汰尾巴里优先级最低的"。若没有任何可淘汰者，或最低优先级就是新来
-  交易本身，则新交易被 `ErrPoolFull` 拒绝、什么都不踢。
+- **序号连续性硬约束（淘汰绝不造成发送者序号断档）**：只有"某个发送者等待中的
+  **最大 nonce**"才允许被淘汰，而且这个最大值是**把新来交易也算进去**之后取的。
+  也就是说，任何一次淘汰都不会留下更大的序号、却丢掉它前面仍然需要的更小序号：
+  - 中间/低序号交易即使全局手续费最低也被保护，搜索会跳过它们，去淘汰"可淘汰
+    尾巴里优先级最低的"；
+  - 新交易若正好是某发送者**紧接着的下一个序号**，它所依赖的已有前缀同样受保护
+    ——例如容量为 1、池里已有序号 0，再提交序号 1 时，序号 0 不再被视为可淘汰的
+    尾巴，序号 1 必须去赢过**其他发送者**的尾巴，否则被整笔拒绝，绝不能"收下序号
+    1 却把序号 0 弄丢"（那样序号 1 永远打包不出去还白占容量）；
+  - 若没有任何可淘汰者，或最低优先级就是新来交易本身，则新交易被 `ErrPoolFull`
+    拒绝、**池里原有交易一笔不少、容量不被突破**（被拒绝的提交不会顺带淘汰任何
+    原本在池里的交易）。
 - 池内部用 `map[hash]` 与 `map[(from,nonce)]hash` 双索引，并有 `sync.RWMutex` 保护，
   并发 gossip 投递与块后 rebase 同时发生也安全（`-race` 下有压测）。
 
@@ -176,6 +184,15 @@ go test ./... -v
 - 交易池
   - `TestPoolCapacityEvictionOrder`：容量打满时手续费/到达序的淘汰顺序，以及"便宜的中间
     序号交易被保护、只淘汰尾巴、序号不断档"。
+  - `TestPoolNextNonceNeverGaps`：新交易正好是发送者下一个序号时的断档回归——容量 1
+    下"有序号 0 再收序号 1"必须整笔拒绝（`ErrPoolFull`）且序号 0 不丢；容量打满时
+    序号 2 只能淘汰**其他发送者**的尾巴，不能踢掉自己依赖的序号 1；拒绝时池内容不变。
+  - `TestPoolEqualFeeFirstComeFirstKept`：同费时更早到达者保留、最新者被淘汰/拒绝，
+    结果确定可复现。
+  - `TestEvictionNeverGapsSenderConcurrent`（白盒，`-race`）：多发送者并发提交，每次
+    准入都在池锁内逐笔核验"被淘汰者一定是（计入新交易后的）该发送者最大序号"。
+  - `TestPoolCappedRebaseConvergence`：两个同容量池收同一混合发送者交易流，淘汰决策
+    逐笔一致；出块上链后 rebase，两节点幸存集合与下一块打包顺序完全一致且无断档。
   - `TestPoolSameNonceConflict`：纯重复 vs 同序异容冲突 vs 坏签名三类拒绝相互可区分。
   - `TestPoolRebaseDeterministic`：两个池子以相反顺序收同一批交易，rebase 后幸存集合与
     打包顺序一致。
@@ -217,7 +234,8 @@ go test ./... -v
 go run ./cmd/demo
 
 # 2) 只看新能力
-go test ./pool/ -v         # 容量淘汰/同序冲突/rebase 一致/并发压力
+go test ./pool/ -v         # 容量淘汰/断档保护/同费先到先留/同序冲突/rebase 一致/并发压力
+go test ./pool/ -v -run 'NextNonce|EqualFee|CappedRebase'   # 只看本轮断档修复
 go test ./state/ -v -run SlashToProtocolAccount
 go test ./node/ -v -run 'Forged|SlashToProtocol|PoolCapped|DoubleVote|Fork|Concurrent|StateRoot'
 
@@ -228,7 +246,9 @@ go test ./... -race
 关注点：
 
 - **交易池**：日志里 `decision: ... evicted ...` 显示踢掉的是低优先级尾巴且 nonce 连续；
-  冲突拒绝打印 `ErrSameNonceConflict`；两节点 rebase 后打包 fee 序列相同。
+  `TestPoolNextNonceNeverGaps` 逐条打印"容量 1 下序号 1 被 `ErrPoolFull` 整笔拒绝、
+  序号 0 保留""序号 2 淘汰的是其他发送者的尾巴"等判定；冲突拒绝打印
+  `ErrSameNonceConflict`；两节点 rebase 后打包 fee 序列相同。
 - **身份**：伪造投票/ proposal 日志为 `REJECT (...bad signature / unknown voter)`；
   被篡改证据的块在证据校验阶段就被拒，后续余额、状态根无任何变化（未误罚）。
 - **罚没去向**：日志 `protocol public account=<x>`，且所有节点该行数值相同、状态根相同；

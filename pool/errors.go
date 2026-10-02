@@ -16,7 +16,10 @@ var (
 	ErrSameNonceConflict = errors.New("tx rejected: different transaction already waiting for the same sender+nonce")
 
 	// ErrPoolFull means the pool is at capacity and the incoming transaction
-	// does not outbid (or out-tie) the lowest-priority occupant: no eligible
-	// occupant can be evicted to make room.
+	// does not outbid (or out-tie) the lowest-priority EVICTABLE occupant: no
+	// eligible occupant can be evicted to make room. This also covers the case
+	// where admitting the newcomer would necessarily gap a sender's nonce
+	// sequence (e.g. cap=1 already holds nonce 0 and nonce 1 arrives): the
+	// transaction is refused whole and the pool is left untouched.
 	ErrPoolFull = errors.New("tx rejected: pool full and fee/arrival priority too low")
 )

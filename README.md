@@ -19,7 +19,7 @@ go test ./... -v      # 全量测试，打印每个输入与判定依据
 - 双签投票 / 双 proposal 识别、验签、1/3 罚没入**协议公共账户**、余额守恒、权重下降：`node/slashing_test.go`、`node/identity_test.go`
 - 并发出块仅调度者有效：`node/concurrent_test.go`
 - 跨节点状态根一致（含公共账户）：`node/root_test.go`、`node/identity_test.go`
-- 交易池容量淘汰 / 序号连续 / 同序冲突 / 重排一致 / 并发压力：`pool/capacity_test.go`、`pool/concurrent_test.go`
+- 交易池容量淘汰 / 序号连续（淘汰绝不造成发送者序号断档）/ 同序冲突 / 重排一致 / 并发压力：`pool/capacity_test.go`、`pool/gap_test.go`、`pool/eviction_internal_test.go`、`pool/concurrent_test.go`
 - 伪造投票、伪造/篡改证据被拒且不误罚：`node/identity_test.go`、`consensus/consensus_test.go`
 - 交易拒绝原因可区分、费用序确定：`state/`、`pool/`
 

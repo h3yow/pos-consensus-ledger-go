@@ -8,10 +8,15 @@
 //     EARLIER arrival wins (so ties evict the newest); a hash tie-break keeps
 //     the comparison total;
 //   - eviction may never create a nonce gap for a sender: an occupant is
-//     evictable only if it is the highest nonce currently waiting from that
-//     sender. The search therefore skips protected middle/low-nonce txs and
-//     evicts the best (lowest-priority) eligible tail; if nothing is eligible
-//     the new transaction is rejected with ErrPoolFull;
+//     evictable only if it is the highest nonce waiting from that sender
+//     COUNTING the incoming transaction. The search therefore skips protected
+//     middle/low-nonce txs and evicts the best (lowest-priority) eligible
+//     tail; if nothing is eligible the new transaction is rejected with
+//     ErrPoolFull. In particular, when the pool is full and the newcomer is a
+//     sender's next consecutive nonce (e.g. cap=1 holding nonce 0, nonce 1
+//     arrives), the existing prefix is protected: the newcomer must outbid
+//     some OTHER sender's tail or be rejected whole — it may not displace the
+//     very nonce it depends on;
 //   - the incoming transaction is part of the comparison. If IT is the
 //     lowest priority it is itself rejected (nothing is evicted).
 //
@@ -144,10 +149,16 @@ func lowerPriority(a, b victim) bool {
 
 // chooseEvictionVictim returns the lowest-priority ELIGIBLE entry considering
 // the incoming tx (seq = next, hash = h). Eligible occupants are exactly the
-// highest waiting nonce of each sender (evicting a tail never opens a gap).
+// highest waiting nonce of each sender — where the INCOMING transaction counts
+// towards its sender's highest nonce. Evicting a tail never opens a gap, and
+// counting the newcomer additionally protects the case where the newcomer
+// itself extends a sender's sequence (e.g. cap=1 holding nonce 0, nonce 1
+// arrives: nonce 0 is no longer a tail once nonce 1 is considered, so the
+// newcomer must win against some other sender's tail or be rejected).
 func (p *Pool) chooseEvictionVictim(in *types.Tx, inHash types.Hash) *victim {
-	// Highest waiting nonce per sender.
+	// Highest waiting nonce per sender, including the incoming transaction.
 	maxNonce := make(map[types.Address]uint64)
+	maxNonce[in.From] = in.Nonce
 	for _, e := range p.pending {
 		if n, ok := maxNonce[e.Tx.From]; !ok || e.Tx.Nonce > n {
 			maxNonce[e.Tx.From] = e.Tx.Nonce
