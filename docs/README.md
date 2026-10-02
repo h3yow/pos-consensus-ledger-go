@@ -7,8 +7,8 @@
 
 本轮在此基础上补齐了三块"长期在线 / 经得起对抗"的能力：
 
-1. **有容量、有明确淘汰口径的交易池**（容量上限、按手续费/到达序淘汰、序号连续、
-   同序冲突可区分拒绝、跨节点重排后结果一致）；
+1. **有容量、有明确淘汰口径的交易池**（容量上限、按手续费/到达序淘汰、**淘汰绝不制造发送者
+   序号断档**、会断档时整笔拒绝且原因可区分、同序冲突可区分拒绝、跨节点并发与块后重排结果一致）；
 2. **作恶证据与验证者真实身份绑定**（Ed25519 公钥在验证者集合中、私钥只在本节点，
    投票与 proposal 都可被任何节点独立验签，伪造/篡改/张冠李戴的证据一律拒绝）；
 3. **罚没资金有明确去处且账目守恒**（罚没进入全网一致的协议公共账户、计入状态承诺、
@@ -20,7 +20,7 @@
 |----|------|
 | `types` | 交易/区块/投票/证据结构，确定性编码，**Ed25519 验证者身份与签名**，SHA-256 哈希 |
 | `state` | 世界状态、交易执行、余额/序号、**罚没入协议公共账户**、确定性状态根 |
-| `pool`  | 交易内存池：**容量上限与淘汰策略**、准入校验、确定性打包，goroutine-safe |
+| `pool`  | 交易内存池：**容量上限、淘汰不造序号断档、两类满池拒绝可区分**、准入校验、确定性打包，goroutine-safe |
 | `consensus` | 验证者集合（含公钥）、加权轮转出块、**验签**、分叉选择、投票池、终局、证据 |
 | `simnet` | 进程内消息交换机：队列、显式投递、延迟/乱序/重复/分区模拟 |
 | `node` | 把组件装配成验证者进程（启动时带自己的私钥；收块、出块、投票、广播、日志） |
@@ -117,7 +117,8 @@ go test ./... -race        # 含并发压力的竞态检测
 | `state.ErrInsufficient` | 余额不足 `value+fee` |
 | `pool.ErrAlreadyKnown` | **纯重复**：规范哈希相同的同一笔交易已在池中 |
 | `pool.ErrSameNonceConflict` | 同发送者**同序号、内容不同**的另一笔交易；直接拒绝，不覆盖原交易 |
-| `pool.ErrPoolFull` | 容量已满且新交易优先级不足以淘汰任何可淘汰者 |
+| `pool.ErrPoolFull` | 容量已满，且存在"踢了也不会断档"的可淘汰占用者，但新交易在手续费/到达序上**输给了它们**（纯优先级不足） |
+| `pool.ErrWouldGapNonce` | 容量已满，而**收下它只能靠丢掉它自己发送者仍需要的更小序号**才能腾出位置——即必然造成序号断档；此时整笔拒绝，池里原交易一笔不少、容量不突破 |
 
 一个 `(发送者, nonce)` 槽位同一时刻**只允许一笔交易**占位；后来的同序异容体被明确
 拒绝，而不是替换。
@@ -133,10 +134,22 @@ go test ./... -race        # 含并发压力的竞态检测
            仍相同按交易哈希排序（保证比较是全序、确定）
   ```
 
-- **序号连续性硬约束**：只有"某个发送者当前等待中的**最大 nonce**"才允许被淘汰
-  （淘汰尾巴不会制造断档）。中间/低序号交易即使全局手续费最低也被保护；搜索会跳过
-  它们，去淘汰"可淘汰尾巴里优先级最低的"。若没有任何可淘汰者，或最低优先级就是新来
-  交易本身，则新交易被 `ErrPoolFull` 拒绝、什么都不踢。
+- **淘汰绝不制造发送者序号断档（头号硬规则）**：判断"谁可被淘汰"时，每个发送者的
+  **最大等待 nonce 是在"现有占用者 ∪ 新来交易"这个候选集合上计算的**。一笔现有占用者
+  只有在它等于"候选集合里该发送者最大 nonce"时才可被淘汰。直接推论：
+  - 新来交易若是某发送者的**紧接着的下一个序号**（或跳得更靠前），它立刻成为该发送者在
+    候选集合里的最大 nonce，于是该发送者**所有现有交易都被保护**——新交易不能靠丢掉自己
+    的前缀来买位置。容量为 1（先收 nonce0、再交 nonce1，哪怕 nonce1 手续费极高）同样如此：
+    要么拒绝，要么拿**别的发送者**的尾巴腾位置，绝不能留下 nonce1 却丢了 nonce0；
+  - 别的发送者的"尾巴"仍然可淘汰（踢掉它不会给那个发送者留下更大的等待序号），这正是一个
+    与该发送者序号不连续相关的新交易可以合法占用的空间。
+  - 中间/低序号交易即使全局手续费最低也被保护；搜索跳过它们，只在"候选集合的可淘汰尾巴里
+    优先级最低者"中取舍。
+- **两种满池拒绝必须分得清，且都不改动池子**：
+  - 存在可淘汰占用者、但它们都比新交易优先级高 → `ErrPoolFull`（竞价失败）；
+  - **没有任何**现有占用者可淘汰（腾位只能踢掉发送者仍需要的更小序号）→ `ErrWouldGapNonce`
+    （收下必断档，整笔拒绝）。两种情况下池内容与容量都与调用前**逐字节一致**，也不会顺带
+    淘汰任何原有交易。新来交易本身永远参与比较：若它就是最低优先级，被拒的是它自己。
 - 池内部用 `map[hash]` 与 `map[(from,nonce)]hash` 双索引，并有 `sync.RWMutex` 保护，
   并发 gossip 投递与块后 rebase 同时发生也安全（`-race` 下有压测）。
 
@@ -175,12 +188,31 @@ go test ./... -v
 
 - 交易池
   - `TestPoolCapacityEvictionOrder`：容量打满时手续费/到达序的淘汰顺序，以及"便宜的中间
-    序号交易被保护、只淘汰尾巴、序号不断档"。
+    序号交易被保护、只淘汰候选集合里的尾巴、序号不断档"。
+  - `TestEvictionNeverGapsSameSender`（**本轮缺陷回归**）：容量为 1 的最小情形（先 nonce0
+    再 nonce1）与容量为 3 的连号情形下，同一发送者的下一个序号都不能靠丢掉前缀被收下，
+    返回 `ErrWouldGapNonce` 且池内容一笔不少；别的发送者高费尾巴仍可合法腾位。
+  - `TestGapHealsByFillingSmallerNonce`：已存在跳号等待时，补进更小序号只会淘汰"含新交易
+    在内的候选集合"的尾巴，剩余连号可正常打包。
+  - `TestEqualFeeEarlierWins`：同费先到先留、后来者 `ErrPoolFull`，且拒绝前后池逐字节不变。
+  - `TestMultiSenderMixedPressure`：多发送者连号 + 单尾巴混合高压下，只踢"踢了不断档"的
+    尾巴；同一发送者的下一个序号可以拿**别的发送者**尾巴的空间合法进入，自己的前缀不丢。
+  - `TestRejectionSideEffects`：满池下 `ErrWouldGapNonce`/`ErrPoolFull`/纯重复/同序冲突/坏
+    签名/余额不足/rebase 后重放（`ErrNonceTooLow`）各自返回**互不相同**的 sentinel，且每类
+    拒绝都不改变池内容、不突破容量。
+  - `TestScriptedNoGapSequence` 与 `TestEvictionInvariantRandomized`：手工压力序列与固定
+    种子 3000 次随机序列，每一步都校验"被移除槽位在移除时刻必是该发送者尾巴"（淘汰不产生
+    新断档）、容量与槽位唯一不变。
   - `TestPoolSameNonceConflict`：纯重复 vs 同序异容冲突 vs 坏签名三类拒绝相互可区分。
   - `TestPoolRebaseDeterministic`：两个池子以相反顺序收同一批交易，rebase 后幸存集合与
     打包顺序一致。
   - `TestPoolConcurrentStress`（`-race`）：多 goroutine 持续压力下容量不被突破、槽位不重复。
-  - `TestPoolCappedNode`（节点级）：小容量高压下保留高费交易、冲突拒绝、出块重排后两节点一致。
+  - `TestCappedNode`（节点级）：小容量高压下保留高费交易、冲突拒绝、出块重排后两节点一致。
+  - `TestCappedPoolCrossNodeConvergence`（节点级，**本轮新增**）：3 个真实小容量节点，
+    goroutine 并发在唯一入口提交不同单尾巴交易（结果与调度无关），经确定性模拟网络广播；
+    校验满池淘汰顺序、下一个序号不造成断档、两类满池拒绝可区分且无副作用、三节点保留集合与
+    下一块出块顺序一致；再经真实出块 + rebase，验证跳号等待交易幸存后节点仍收敛，随后
+    "单发送者连号填满 → 下一个序号被 `ErrWouldGapNonce` 拒绝"在每个节点上一致。
 - 身份与证据
   - `TestForgedVoteRejected`：垃圾签名 / 用别人钥匙签却署他人名 / 未知验证者，一律拒绝；
     诚实验证者真实投票被接受；同一投票重复广播为无害重复。
@@ -217,18 +249,25 @@ go test ./... -v
 go run ./cmd/demo
 
 # 2) 只看新能力
-go test ./pool/ -v         # 容量淘汰/同序冲突/rebase 一致/并发压力
+go test ./pool/ -v         # 断档回归/同费先到/多发送者/拒绝无副作用/随机与脚本化不变量/并发压力
 go test ./state/ -v -run SlashToProtocolAccount
-go test ./node/ -v -run 'Forged|SlashToProtocol|PoolCapped|DoubleVote|Fork|Concurrent|StateRoot'
+go test ./node/ -v -run 'Forged|SlashToProtocol|PoolCapped|CappedPoolCrossNode|DoubleVote|Fork|Concurrent|StateRoot'
 
 # 3) 竞态
 go test ./... -race
+
+# 4) 只复现本次"满池断档"缺陷的回归
+go test ./pool/ -v -run 'EvictionNeverGaps|GapHeals|ScriptedNoGap|InvariantRandomized|EqualFee|MultiSender|RejectionSideEffects'
+go test ./node/ -v -run CappedPoolCrossNodeConvergence
 ```
 
 关注点：
 
-- **交易池**：日志里 `decision: ... evicted ...` 显示踢掉的是低优先级尾巴且 nonce 连续；
-  冲突拒绝打印 `ErrSameNonceConflict`；两节点 rebase 后打包 fee 序列相同。
+- **交易池**：日志里 `decision: ...` 显示踢掉的是"含新交易候选集合"里的低优先级尾巴且不产生
+  新断档；同一发送者的紧接下一个序号在满池时打印 `REJECT (...would gap the sender's nonce
+  sequence)`（`ErrWouldGapNonce`），而纯粹竞价失败打印 `ErrPoolFull`，二者可区分；冲突拒绝
+  打印 `ErrSameNonceConflict`；任何拒绝后 `pool=...` 数量与槽位不变；两节点 rebase 后打包
+  fee/nonce 序列相同。
 - **身份**：伪造投票/ proposal 日志为 `REJECT (...bad signature / unknown voter)`；
   被篡改证据的块在证据校验阶段就被拒，后续余额、状态根无任何变化（未误罚）。
 - **罚没去向**：日志 `protocol public account=<x>`，且所有节点该行数值相同、状态根相同；

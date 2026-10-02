@@ -39,6 +39,7 @@ func TestPoolConcurrentStress(t *testing.T) {
 				switch {
 				case err == nil,
 					errors.Is(err, pool.ErrPoolFull),
+					errors.Is(err, pool.ErrWouldGapNonce),
 					errors.Is(err, pool.ErrAlreadyKnown),
 					errors.Is(err, pool.ErrSameNonceConflict):
 				default:

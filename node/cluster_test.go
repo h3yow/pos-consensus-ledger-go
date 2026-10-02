@@ -50,6 +50,19 @@ type cluster struct {
 }
 
 func newCluster(t *testing.T, n int, stakes ...uint64) *cluster {
+	return newClusterWith(t, n, node.DefaultPoolCap, stakes...)
+}
+
+// newClusterWith builds a cluster whose nodes use the given mempool capacity
+// (<=0 falls back to the default). It exists so pressure/eviction tests can
+// run real nodes (gossip + block production + rebase) against a tiny pool.
+func newClusterWith(t *testing.T, n, poolCap int, stakes ...uint64) *cluster {
+	return newClusterWithUsers(t, n, poolCap, nil, stakes...)
+}
+
+// newClusterWithUsers additionally pre-funds the given (non-validator) user
+// addresses at genesis.
+func newClusterWithUsers(t *testing.T, n, poolCap int, users map[types.Address]uint64, stakes ...uint64) *cluster {
 	t.Helper()
 	w := &tWriter{t: t}
 	net := simnet.New()
@@ -73,6 +86,9 @@ func newCluster(t *testing.T, n int, stakes ...uint64) *cluster {
 	// key; transactions use the simulation tx signature)
 	user := userAddr(99)
 	allocs = append(allocs, consensus.GenesisAlloc{Addr: user, Balance: 5000})
+	for a, bal := range users {
+		allocs = append(allocs, consensus.GenesisAlloc{Addr: a, Balance: bal})
+	}
 	g, gs := consensus.MakeGenesis(vals, allocs)
 
 	nodes := make([]*node.Node, n)
@@ -85,6 +101,7 @@ func newCluster(t *testing.T, n int, stakes ...uint64) *cluster {
 			Vals:         vals,
 			Genesis:      g,
 			GenesisState: gs,
+			PoolCap:      poolCap,
 			Logger:       log.New(w, "", 0),
 		})
 	}

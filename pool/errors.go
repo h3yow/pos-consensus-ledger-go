@@ -19,4 +19,14 @@ var (
 	// does not outbid (or out-tie) the lowest-priority occupant: no eligible
 	// occupant can be evicted to make room.
 	ErrPoolFull = errors.New("tx rejected: pool full and fee/arrival priority too low")
+
+	// ErrWouldGapNonce means the pool is at capacity and the ONLY way to make
+	// room for this transaction would be to evict an occupant that its sender
+	// still needs first, which would leave the sender with a nonce gap (a
+	// higher waiting nonce kept while a smaller required one is gone). The
+	// transaction is refused wholesale: nothing is evicted and the pool
+	// contents are untouched. This is distinct from ErrPoolFull (an eligible
+	// tail exists but the newcomer loses on fee/arrival priority) and from the
+	// state-level nonce errors (ErrNonceTooLow / ErrNonceTooHigh).
+	ErrWouldGapNonce = errors.New("tx rejected: pool full and admission would gap the sender's nonce sequence")
 )
